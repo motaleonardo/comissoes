@@ -284,6 +284,136 @@ class SQLServerDataSource:
         """
         return pd.read_sql(sql, self.conn)
 
+    def extract_machine_source_audit(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> pd.DataFrame:
+        """Audit source rows and gross revenue before enrichment joins."""
+        sql = """
+        WITH origem AS (
+            SELECT
+                CAST('Faturamento' AS varchar(20)) AS tipo,
+                COUNT(*) AS qtd_linhas,
+                SUM(CAST(COALESCE(f.[Valor Total], 0) AS float)) AS receita_bruta
+            FROM bdnFaturamentoMaquinas f
+            WHERE TRY_CONVERT(date, f.[Data de Emissão], 103) BETWEEN ? AND ?
+              AND (
+                  f.[Produto Código] IS NULL
+                  OR LTRIM(RTRIM(f.[Produto Código])) NOT LIKE '%CVD%'
+              )
+
+            UNION ALL
+
+            SELECT
+                CAST('Devolução' AS varchar(20)) AS tipo,
+                COUNT(*) AS qtd_linhas,
+                SUM(CAST(COALESCE(d.[Valor Total], 0) AS float)) AS receita_bruta
+            FROM bdnDevolucaoMaquinas d
+            WHERE TRY_CONVERT(date, d.[Data de Emissão], 103) BETWEEN ? AND ?
+              AND (
+                  d.[Produto Código] IS NULL
+                  OR LTRIM(RTRIM(d.[Produto Código])) NOT LIKE '%CVD%'
+              )
+        )
+        SELECT
+            tipo AS [Tipo],
+            qtd_linhas AS [Qtd Linhas SQL],
+            COALESCE(receita_bruta, 0.0) AS [Receita Bruta SQL]
+        FROM origem
+
+        UNION ALL
+
+        SELECT
+            CAST('Total' AS varchar(20)) AS [Tipo],
+            SUM(qtd_linhas) AS [Qtd Linhas SQL],
+            SUM(COALESCE(receita_bruta, 0.0)) AS [Receita Bruta SQL]
+        FROM origem
+        """
+        return pd.read_sql(
+            sql,
+            self.conn,
+            params=(start_date, end_date, start_date, end_date),
+        )
+
+    def extract_machine_incentive_audit(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> pd.DataFrame:
+        """Audit incentives for chassis present in the source machine extraction."""
+        sql = """
+        WITH base_chassis AS (
+            SELECT LTRIM(RTRIM(f.[Chassi])) AS chassi
+            FROM bdnFaturamentoMaquinas f
+            WHERE TRY_CONVERT(date, f.[Data de Emissão], 103) BETWEEN ? AND ?
+              AND (
+                  f.[Produto Código] IS NULL
+                  OR LTRIM(RTRIM(f.[Produto Código])) NOT LIKE '%CVD%'
+              )
+              AND NULLIF(LTRIM(RTRIM(f.[Chassi])), '') IS NOT NULL
+
+            UNION
+
+            SELECT LTRIM(RTRIM(d.[Chassi])) AS chassi
+            FROM bdnDevolucaoMaquinas d
+            WHERE TRY_CONVERT(date, d.[Data de Emissão], 103) BETWEEN ? AND ?
+              AND (
+                  d.[Produto Código] IS NULL
+                  OR LTRIM(RTRIM(d.[Produto Código])) NOT LIKE '%CVD%'
+              )
+              AND NULLIF(LTRIM(RTRIM(d.[Chassi])), '') IS NOT NULL
+        ),
+        incentivo_titulos AS (
+            SELECT
+                LTRIM(RTRIM(i.[Chassi])) AS chassi,
+                NULLIF(LTRIM(RTRIM(i.[Nota Fiscal Número])), '') AS titulo_incentivo,
+                SUM(CAST(COALESCE(i.[Valor Incentivo], 0) AS float)) AS valor_incentivo
+            FROM bdnIncentivos i
+            INNER JOIN base_chassis b
+                ON b.chassi COLLATE SQL_Latin1_General_CP1_CI_AS
+                 = LTRIM(RTRIM(i.[Chassi])) COLLATE SQL_Latin1_General_CP1_CI_AS
+            WHERE NULLIF(LTRIM(RTRIM(i.[Chassi])), '') IS NOT NULL
+            GROUP BY
+                LTRIM(RTRIM(i.[Chassi])),
+                LTRIM(RTRIM(i.[Nota Fiscal Número]))
+        )
+        SELECT
+            COUNT(DISTINCT b.chassi) AS [Qtd Chassis SQL],
+            COUNT(DISTINCT incentivo_titulos.chassi) AS [Qtd Chassis com Incentivo SQL],
+            COUNT(DISTINCT incentivo_titulos.titulo_incentivo) AS [Qtd Títulos Incentivo SQL],
+            COALESCE(SUM(incentivo_titulos.valor_incentivo), 0.0) AS [Valor Incentivo SQL],
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN incentivo_titulos.titulo_incentivo IS NOT NULL
+                        THEN incentivo_titulos.valor_incentivo
+                        ELSE 0.0
+                    END
+                ),
+                0.0
+            ) AS [Valor Incentivo com Título SQL],
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN incentivo_titulos.titulo_incentivo IS NULL
+                        THEN incentivo_titulos.valor_incentivo
+                        ELSE 0.0
+                    END
+                ),
+                0.0
+            ) AS [Valor Incentivo sem Título SQL]
+        FROM base_chassis b
+        LEFT JOIN incentivo_titulos
+            ON incentivo_titulos.chassi COLLATE SQL_Latin1_General_CP1_CI_AS
+             = b.chassi COLLATE SQL_Latin1_General_CP1_CI_AS
+        """
+        return pd.read_sql(
+            sql,
+            self.conn,
+            params=(start_date, end_date, start_date, end_date),
+        )
+
     def extract_machine_commission_base(
         self,
         start_date: date,
@@ -310,6 +440,39 @@ class SQLServerDataSource:
             FROM incentivo_titulos
             GROUP BY chassi
         ),
+        veiculos AS (
+            SELECT
+                LTRIM(RTRIM([Chassi])) AS chassi,
+                MAX(LTRIM(RTRIM([Veículo Modelo]))) AS veiculo_modelo
+            FROM bdnVeiculos
+            WHERE NULLIF(LTRIM(RTRIM([Chassi])), '') IS NOT NULL
+            GROUP BY LTRIM(RTRIM([Chassi]))
+        ),
+        vendedores AS (
+            SELECT
+                LTRIM(RTRIM([Vendedor Código])) AS vendedor_codigo,
+                MAX(LTRIM(RTRIM([Vendedor Nome]))) AS vendedor_nome
+            FROM bdnVendedor
+            WHERE NULLIF(LTRIM(RTRIM([Vendedor Código])), '') IS NOT NULL
+            GROUP BY LTRIM(RTRIM([Vendedor Código]))
+        ),
+        clientes AS (
+            SELECT
+                LTRIM(RTRIM([Cliente Código])) AS cliente_codigo,
+                MAX(LTRIM(RTRIM([Cliente Nome]))) AS cliente_nome
+            FROM bdnCliente
+            WHERE NULLIF(LTRIM(RTRIM([Cliente Código])), '') IS NOT NULL
+            GROUP BY LTRIM(RTRIM([Cliente Código]))
+        ),
+        centros_custo AS (
+            SELECT
+                LTRIM(RTRIM(CAST([Código C.Custo] AS varchar(50)))) AS centro_custo,
+                MAX(LTRIM(RTRIM([Descrição C.Custo]))) AS descricao_custo,
+                MAX(LTRIM(RTRIM([Lojas]))) AS lojas
+            FROM datawarehouse.dbo.bdnOrganizacaoCentroDeCusto
+            WHERE [Código C.Custo] IS NOT NULL
+            GROUP BY LTRIM(RTRIM(CAST([Código C.Custo] AS varchar(50))))
+        ),
         base AS (
             SELECT
                 CAST('Faturamento' AS varchar(20)) AS tipo,
@@ -329,6 +492,10 @@ class SQLServerDataSource:
                 ) AS margem
             FROM bdnFaturamentoMaquinas f
             WHERE TRY_CONVERT(date, f.[Data de Emissão], 103) BETWEEN ? AND ?
+              AND (
+                  f.[Produto Código] IS NULL
+                  OR LTRIM(RTRIM(f.[Produto Código])) NOT LIKE '%CVD%'
+              )
 
             UNION ALL
 
@@ -353,16 +520,20 @@ class SQLServerDataSource:
                 ) AS margem
             FROM bdnDevolucaoMaquinas d
             WHERE TRY_CONVERT(date, d.[Data de Emissão], 103) BETWEEN ? AND ?
+              AND (
+                  d.[Produto Código] IS NULL
+                  OR LTRIM(RTRIM(d.[Produto Código])) NOT LIKE '%CVD%'
+              )
         )
         SELECT
             base.tipo AS [Tipo],
-            org.[Lojas] AS [Filial],
+            org.lojas AS [Filial],
             base.data_emissao AS [Data de Emissão],
             base.nro_documento AS [Nro Documento],
-            veic.[Veículo Modelo] AS [Modelo],
+            veic.veiculo_modelo AS [Modelo],
             base.chassi AS [Nro Chassi],
-            cli.[Cliente Nome] AS [Nome do Cliente],
-            vend.[Vendedor Nome] AS [CEN],
+            cli.cliente_nome AS [Nome do Cliente],
+            vend.vendedor_nome AS [CEN],
             CAST(NULL AS varchar(100)) AS [Classificação Venda],
             base.receita_bruta AS [Receita Bruta],
             CAST(0.0 AS float) AS [% Comissão Fat.],
@@ -371,7 +542,7 @@ class SQLServerDataSource:
             base.margem AS [Margem R$],
             CASE
                 WHEN NULLIF(base.receita_liquida, 0) IS NULL THEN 0.0
-                ELSE base.margem / base.receita_liquida
+                ELSE (base.margem / base.receita_liquida) * 100
             END AS [% Margem Direta],
             COALESCE(inc.valor_incentivo, 0.0) AS [Valor Incentivo],
             base.receita_bruta + COALESCE(inc.valor_incentivo, 0.0) AS [Receita Bruta + Incentivos R$],
@@ -379,7 +550,7 @@ class SQLServerDataSource:
             CAST(0.0 AS float) AS [Meta de Margem],
             CASE
                 WHEN NULLIF(base.receita_liquida, 0) IS NULL THEN 0.0
-                ELSE (base.margem + COALESCE(inc.valor_incentivo, 0.0)) / base.receita_liquida
+                ELSE ((base.margem + COALESCE(inc.valor_incentivo, 0.0)) / base.receita_liquida) * 100
             END AS [% Margem Bruta],
             CAST(0.0 AS float) AS [% Comissão Margem],
             base.receita_bruta * 0.0 AS [Valor Comissão Margem],
@@ -388,17 +559,17 @@ class SQLServerDataSource:
         LEFT JOIN incentivos inc
             ON inc.chassi COLLATE SQL_Latin1_General_CP1_CI_AS
              = base.chassi COLLATE SQL_Latin1_General_CP1_CI_AS
-        LEFT JOIN bdnVeiculos veic
-            ON LTRIM(RTRIM(veic.[Chassi])) COLLATE SQL_Latin1_General_CP1_CI_AS
+        LEFT JOIN veiculos veic
+            ON veic.chassi COLLATE SQL_Latin1_General_CP1_CI_AS
              = base.chassi COLLATE SQL_Latin1_General_CP1_CI_AS
-        LEFT JOIN bdnVendedor vend
-            ON LTRIM(RTRIM(vend.[Vendedor Código])) COLLATE SQL_Latin1_General_CP1_CI_AS
+        LEFT JOIN vendedores vend
+            ON vend.vendedor_codigo COLLATE SQL_Latin1_General_CP1_CI_AS
              = base.vendedor_codigo COLLATE SQL_Latin1_General_CP1_CI_AS
-        LEFT JOIN bdnCliente cli
-            ON LTRIM(RTRIM(cli.[Cliente Código])) COLLATE SQL_Latin1_General_CP1_CI_AS
+        LEFT JOIN clientes cli
+            ON cli.cliente_codigo COLLATE SQL_Latin1_General_CP1_CI_AS
              = base.cliente_codigo COLLATE SQL_Latin1_General_CP1_CI_AS
-        LEFT JOIN datawarehouse.dbo.bdnOrganizacaoCentroDeCusto org
-            ON LTRIM(RTRIM(CAST(org.[Código C.Custo] AS varchar(50)))) COLLATE SQL_Latin1_General_CP1_CI_AS
+        LEFT JOIN centros_custo org
+            ON org.centro_custo COLLATE SQL_Latin1_General_CP1_CI_AS
              = base.centro_custo COLLATE SQL_Latin1_General_CP1_CI_AS
         ORDER BY
             TRY_CONVERT(date, base.data_emissao, 103),

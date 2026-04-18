@@ -13,8 +13,14 @@ from dotenv import load_dotenv
 
 from commission_tool.config import DISPLAY_COLUMNS, STATUS_APTO, STATUS_NAO_APTO, STATUS_VERIFICAR
 from commission_tool.core.eligibility import diagnose_key_formats, run_eligibility_validation
+from commission_tool.core.formatting import format_currency_br, format_percent_br
 from commission_tool.core.periods import MONTH_NAMES_PT, build_period_options, default_base_period
-from commission_tool.data.pipeline import extract_incentive_titles, extract_machine_commission_base
+from commission_tool.data.pipeline import (
+    extract_incentive_titles,
+    extract_machine_commission_base,
+    extract_machine_incentive_audit,
+    extract_machine_source_audit,
+)
 from commission_tool.data.sources.postgres import (
     ensure_commission_tables,
     read_paid_commissions,
@@ -25,6 +31,162 @@ from commission_tool.data.sources.postgres import (
 )
 from commission_tool.data.sources.sqlserver import get_connection
 from commission_tool.io.excel import dataframe_to_excel_download, load_commission_spreadsheet
+
+
+CURRENCY_COLUMNS = [
+    "Receita Bruta",
+    "Valor Comissão Fat.",
+    "CMV",
+    "Margem R$",
+    "Valor Incentivo",
+    "Receita Bruta + Incentivos R$",
+    "Margem + Incentivos R$",
+    "Valor Comissão Margem",
+    "Valor Comissão Total",
+    "Valor Comissão",
+    "V1 - Saldo Incentivo",
+    "V2 - Saldo Cliente",
+    "Saldo Incentivo",
+]
+
+PERCENT_COLUMNS = [
+    "% Comissão Fat.",
+    "% Margem Direta",
+    "Meta de Margem",
+    "% Margem Bruta",
+    "% Comissão Margem",
+]
+
+
+def format_machine_display_df(df: pd.DataFrame) -> pd.DataFrame:
+    display_df = df.copy()
+    for column in CURRENCY_COLUMNS:
+        if column in display_df.columns:
+            display_df[column] = display_df[column].apply(format_currency_br)
+    for column in PERCENT_COLUMNS:
+        if column in display_df.columns:
+            display_df[column] = display_df[column].apply(format_percent_br)
+    return display_df
+
+
+def render_machine_audit(
+    df_machine: pd.DataFrame,
+    df_source_audit: pd.DataFrame | None,
+    df_incentive_audit: pd.DataFrame | None,
+) -> None:
+    if df_source_audit is None or df_incentive_audit is None:
+        return
+
+    st.markdown('<div class="section-title">Auditoria da Extração</div>', unsafe_allow_html=True)
+    st.caption("Conferência independente entre os selects base no SQL Server e a tabela única gerada.")
+
+    table_summary = (
+        df_machine.groupby("Tipo", dropna=False)
+        .agg(
+            **{
+                "Qtd Linhas Tabela Única": ("Tipo", "size"),
+                "Receita Bruta Tabela Única": ("Receita Bruta", lambda series: pd.to_numeric(series, errors="coerce").sum()),
+            }
+        )
+        .reset_index()
+    )
+    total_row = pd.DataFrame(
+        [
+            {
+                "Tipo": "Total",
+                "Qtd Linhas Tabela Única": table_summary["Qtd Linhas Tabela Única"].sum(),
+                "Receita Bruta Tabela Única": table_summary["Receita Bruta Tabela Única"].sum(),
+            }
+        ]
+    )
+    table_summary = pd.concat([table_summary, total_row], ignore_index=True)
+
+    source_comparison = df_source_audit.merge(table_summary, on="Tipo", how="outer").fillna(0)
+    source_comparison["Diferença Linhas"] = (
+        source_comparison["Qtd Linhas Tabela Única"] - source_comparison["Qtd Linhas SQL"]
+    )
+    source_comparison["Diferença Receita Bruta"] = (
+        source_comparison["Receita Bruta Tabela Única"] - source_comparison["Receita Bruta SQL"]
+    )
+
+    total_source = source_comparison[source_comparison["Tipo"] == "Total"].iloc[0]
+    col_lines, col_revenue, col_incentive = st.columns(3)
+    col_lines.metric(
+        "Diferença linhas",
+        int(total_source["Diferença Linhas"]),
+        help="Tabela única menos select simples das tabelas de origem.",
+    )
+    col_revenue.metric(
+        "Diferença Receita Bruta",
+        format_currency_br(total_source["Diferença Receita Bruta"]),
+        help="Tabela única menos select simples das tabelas de origem.",
+    )
+
+    incentive_audit = df_incentive_audit.iloc[0]
+    incentive_audit_value = lambda column: incentive_audit.get(column, 0)
+    unique_machine_incentives = (
+        df_machine.drop_duplicates(subset=["Nro Chassi"])["Valor Incentivo"].pipe(pd.to_numeric, errors="coerce").sum()
+    )
+    row_machine_incentives = pd.to_numeric(df_machine["Valor Incentivo"], errors="coerce").sum()
+    incentive_diff = unique_machine_incentives - incentive_audit_value("Valor Incentivo SQL")
+    col_incentive.metric(
+        "Diferença Incentivos",
+        format_currency_br(incentive_diff),
+        help="Tabela única por chassis únicos menos select simples de incentivos.",
+    )
+
+    display_source = source_comparison.copy()
+    for column in ["Receita Bruta SQL", "Receita Bruta Tabela Única", "Diferença Receita Bruta"]:
+        display_source[column] = display_source[column].apply(format_currency_br)
+    for column in ["Qtd Linhas SQL", "Qtd Linhas Tabela Única", "Diferença Linhas"]:
+        display_source[column] = display_source[column].astype(int)
+
+    incentive_comparison = pd.DataFrame(
+        [
+            {
+                "Critério": "Select SQL por chassis únicos",
+                "Qtd Chassis": int(incentive_audit_value("Qtd Chassis SQL")),
+                "Qtd Chassis com Incentivo": int(incentive_audit_value("Qtd Chassis com Incentivo SQL")),
+                "Qtd Títulos Incentivo": int(incentive_audit_value("Qtd Títulos Incentivo SQL")),
+                "Valor Incentivo": incentive_audit_value("Valor Incentivo SQL"),
+                "Valor Incentivo com Título": incentive_audit_value("Valor Incentivo com Título SQL"),
+                "Valor Incentivo sem Título": incentive_audit_value("Valor Incentivo sem Título SQL"),
+            },
+            {
+                "Critério": "Tabela única por chassis únicos",
+                "Qtd Chassis": int(df_machine["Nro Chassi"].nunique()),
+                "Qtd Chassis com Incentivo": int(
+                    df_machine.loc[
+                        pd.to_numeric(df_machine["Valor Incentivo"], errors="coerce").fillna(0) != 0,
+                        "Nro Chassi",
+                    ].nunique()
+                ),
+                "Qtd Títulos Incentivo": 0,
+                "Valor Incentivo": unique_machine_incentives,
+                "Valor Incentivo com Título": unique_machine_incentives,
+                "Valor Incentivo sem Título": 0.0,
+            },
+            {
+                "Critério": "Tabela única por linhas",
+                "Qtd Chassis": len(df_machine),
+                "Qtd Chassis com Incentivo": int(
+                    (pd.to_numeric(df_machine["Valor Incentivo"], errors="coerce").fillna(0) != 0).sum()
+                ),
+                "Qtd Títulos Incentivo": 0,
+                "Valor Incentivo": row_machine_incentives,
+                "Valor Incentivo com Título": row_machine_incentives,
+                "Valor Incentivo sem Título": 0.0,
+            },
+        ]
+    )
+    for column in ["Valor Incentivo", "Valor Incentivo com Título", "Valor Incentivo sem Título"]:
+        incentive_comparison[column] = incentive_comparison[column].apply(format_currency_br)
+
+    with st.expander("Ver detalhes da auditoria"):
+        st.markdown("**Linhas e Receita Bruta**")
+        st.dataframe(display_source, use_container_width=True, hide_index=True)
+        st.markdown("**Incentivos**")
+        st.dataframe(incentive_comparison, use_container_width=True, hide_index=True)
 
 
 def render_header() -> None:
@@ -171,7 +333,7 @@ def render_paid_commissions_view() -> None:
     df_paid = st.session_state.get("paid_commissions_lookup")
     if df_paid is not None and not df_paid.empty:
         total_paid = pd.to_numeric(df_paid.get("valor_comissao_total"), errors="coerce").sum()
-        st.metric("Total pago", f"R$ {total_paid:,.2f}")
+        st.metric("Total pago", format_currency_br(total_paid))
         sidebar_cols = [
             "mes_ano_comissao",
             "filial",
@@ -267,7 +429,7 @@ def render_spreadsheet_preview(df_planilha: pd.DataFrame) -> None:
     col_a.metric("Total de registros", len(df_planilha))
     col_b.metric(
         "Valor total comissão",
-        f"R$ {pd.to_numeric(df_planilha['Valor Comissão Total'], errors='coerce').sum():,.2f}",
+        format_currency_br(pd.to_numeric(df_planilha["Valor Comissão Total"], errors="coerce").sum()),
     )
 
     with st.expander("👁️ Prévia da planilha"):
@@ -389,8 +551,8 @@ def render_results() -> None:
     k2.metric("✅ Aptos", aptos)
     k3.metric("❌ Não Aptos", n_aptos)
     k4.metric("⚠️ Verificar", verif)
-    k5.metric("Valor Apto", f"R$ {val_apta:,.2f}")
-    k6.metric("Valor Bloqueado", f"R$ {val_n_apta:,.2f}")
+    k5.metric("Valor Apto", format_currency_br(val_apta))
+    k6.metric("Valor Bloqueado", format_currency_br(val_n_apta))
 
     st.divider()
     col_f1, col_f2, col_f3 = st.columns(3)
@@ -502,9 +664,21 @@ def render_machine_extraction() -> None:
                     selected_period.end_date,
                 )
                 df_incentives = extract_incentive_titles(conn)
+                df_source_audit = extract_machine_source_audit(
+                    conn,
+                    selected_period.start_date,
+                    selected_period.end_date,
+                )
+                df_incentive_audit = extract_machine_incentive_audit(
+                    conn,
+                    selected_period.start_date,
+                    selected_period.end_date,
+                )
             conn.close()
             st.session_state.machine_df = df_machine
             st.session_state.incentive_titles_df = df_incentives
+            st.session_state.machine_source_audit_df = df_source_audit
+            st.session_state.machine_incentive_audit_df = df_incentive_audit
             st.session_state.machine_period_label = selected_period.label
             st.success(f"Extração concluída: {len(df_machine)} registros.")
         except Exception as exc:
@@ -523,12 +697,18 @@ def render_machine_extraction() -> None:
 
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Registros", len(df_machine))
-    k2.metric("Receita Bruta", f"R$ {total_receita:,.2f}")
-    k3.metric("Margem R$", f"R$ {total_margem:,.2f}")
-    k4.metric("Incentivos", f"R$ {total_incentivo:,.2f}")
-    k5.metric("Comissão Total", f"R$ {total_comissao:,.2f}")
+    k2.metric("Receita Bruta", format_currency_br(total_receita))
+    k3.metric("Margem R$", format_currency_br(total_margem))
+    k4.metric("Incentivos", format_currency_br(total_incentivo))
+    k5.metric("Comissão Total", format_currency_br(total_comissao))
 
-    editable_df = df_machine.copy()
+    render_machine_audit(
+        df_machine,
+        st.session_state.get("machine_source_audit_df"),
+        st.session_state.get("machine_incentive_audit_df"),
+    )
+
+    editable_df = format_machine_display_df(df_machine)
     if "Pagar" not in editable_df.columns:
         editable_df.insert(0, "Pagar", False)
 
@@ -539,24 +719,11 @@ def render_machine_extraction() -> None:
         disabled=[column for column in editable_df.columns if column != "Pagar"],
         column_config={
             "Pagar": st.column_config.CheckboxColumn("Pagar", default=False),
-            "Receita Bruta": st.column_config.NumberColumn("Receita Bruta", format="R$ %.2f"),
-            "Valor Comissão Fat.": st.column_config.NumberColumn("Comissão Fat.", format="R$ %.2f"),
-            "CMV": st.column_config.NumberColumn("CMV", format="R$ %.2f"),
-            "Margem R$": st.column_config.NumberColumn("Margem R$", format="R$ %.2f"),
-            "% Margem Direta": st.column_config.NumberColumn("% Margem Direta", format="%.2f%%"),
-            "Valor Incentivo": st.column_config.NumberColumn("Incentivos", format="R$ %.2f"),
-            "Receita Bruta + Incentivos R$": st.column_config.NumberColumn(
-                "Receita + Incentivos",
-                format="R$ %.2f",
-            ),
-            "Margem + Incentivos R$": st.column_config.NumberColumn("Margem + Incentivos", format="R$ %.2f"),
-            "% Margem Bruta": st.column_config.NumberColumn("% Margem Bruta", format="%.2f%%"),
-            "Valor Comissão Margem": st.column_config.NumberColumn("Comissão Margem", format="R$ %.2f"),
-            "Valor Comissão Total": st.column_config.NumberColumn("Comissão Total", format="R$ %.2f"),
         },
         key="machine_payment_editor",
     )
-    selected_to_pay = edited_df[edited_df["Pagar"] == True].drop(columns=["Pagar"])
+    selected_indexes = edited_df.index[edited_df["Pagar"] == True]
+    selected_to_pay = df_machine.loc[selected_indexes]
     st.caption(f"{len(selected_to_pay)} comissões selecionadas para pagamento.")
 
     col_pay, col_schema = st.columns(2)
@@ -602,13 +769,9 @@ def render_machine_extraction() -> None:
     with st.expander("Títulos de incentivo por chassi"):
         st.caption("Tabela separada para auditoria dos títulos de incentivo e saldo no contas a receber.")
         st.dataframe(
-            df_incentives,
+            format_machine_display_df(df_incentives),
             use_container_width=True,
             height=350,
-            column_config={
-                "Valor Incentivo": st.column_config.NumberColumn("Valor Incentivo", format="R$ %.2f"),
-                "Saldo Incentivo": st.column_config.NumberColumn("Saldo Incentivo", format="R$ %.2f"),
-            },
         )
         col_export, col_save = st.columns(2)
         with col_export:
@@ -773,6 +936,10 @@ def main() -> None:
         st.session_state.machine_df = None
     if "incentive_titles_df" not in st.session_state:
         st.session_state.incentive_titles_df = None
+    if "machine_source_audit_df" not in st.session_state:
+        st.session_state.machine_source_audit_df = None
+    if "machine_incentive_audit_df" not in st.session_state:
+        st.session_state.machine_incentive_audit_df = None
     if "paid_commissions_lookup" not in st.session_state:
         st.session_state.paid_commissions_lookup = None
 

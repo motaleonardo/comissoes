@@ -8,6 +8,8 @@ from urllib.parse import quote_plus
 
 import pandas as pd
 
+from commission_tool.core.formatting import parse_br_number, parse_percent_points
+
 
 PAID_COMMISSIONS_TABLE = "comissoespagas"
 FAT_RATE_TABLE = "comissao_faturamento_modelo"
@@ -45,6 +47,11 @@ PAID_COLUMN_MAP = {
 def get_postgres_url() -> str:
     explicit_url = os.getenv("POSTGRES_URL", "").strip()
     if explicit_url:
+        # Normalize common URL schemes to the SQLAlchemy psycopg dialect
+        if explicit_url.startswith("postgres://"):
+            explicit_url = explicit_url.replace("postgres://", "postgresql+psycopg://", 1)
+        elif explicit_url.startswith("postgresql://"):
+            explicit_url = explicit_url.replace("postgresql://", "postgresql+psycopg://", 1)
         return explicit_url
 
     host = os.getenv("POSTGRES_HOST", "").strip()
@@ -131,8 +138,9 @@ def ensure_commission_tables() -> None:
                 f"""
                 CREATE TABLE IF NOT EXISTS {FAT_RATE_TABLE} (
                     id BIGSERIAL PRIMARY KEY,
+                    grupo TEXT,
                     modelo TEXT NOT NULL UNIQUE,
-                    percentual_comissao_fat NUMERIC(12, 6) NOT NULL DEFAULT 0,
+                    percentual NUMERIC(12, 6) NOT NULL DEFAULT 0,
                     ativo BOOLEAN NOT NULL DEFAULT TRUE,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 )
@@ -144,8 +152,9 @@ def ensure_commission_tables() -> None:
                 f"""
                 CREATE TABLE IF NOT EXISTS {MARGIN_RATE_TABLE} (
                     id BIGSERIAL PRIMARY KEY,
+                    grupo TEXT,
                     modelo TEXT NOT NULL UNIQUE,
-                    percentual_comissao_margem NUMERIC(12, 6) NOT NULL DEFAULT 0,
+                    percentual NUMERIC(12, 6) NOT NULL DEFAULT 0,
                     meta_margem NUMERIC(12, 6) NOT NULL DEFAULT 0,
                     ativo BOOLEAN NOT NULL DEFAULT TRUE,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -199,24 +208,28 @@ def _prepare_paid_commissions_df(
     if "data_emissao" in prepared.columns:
         prepared["data_emissao"] = pd.to_datetime(prepared["data_emissao"], dayfirst=True, errors="coerce").dt.date
 
-    numeric_columns = [
+    amount_columns = [
         "receita_bruta",
-        "perc_comissao_fat",
         "valor_comissao_fat",
         "cmv",
         "margem_rs",
-        "perc_margem_direta",
         "valor_incentivo",
         "receita_bruta_incentivos_rs",
         "margem_incentivos_rs",
-        "meta_margem",
-        "perc_margem_bruta",
-        "perc_comissao_margem",
         "valor_comissao_margem",
         "valor_comissao_total",
     ]
-    for column in numeric_columns:
-        prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
+    percent_columns = [
+        "perc_comissao_fat",
+        "perc_margem_direta",
+        "meta_margem",
+        "perc_margem_bruta",
+        "perc_comissao_margem",
+    ]
+    for column in amount_columns:
+        prepared[column] = prepared[column].apply(parse_br_number)
+    for column in percent_columns:
+        prepared[column] = prepared[column].apply(parse_percent_points)
 
     return prepared
 
@@ -281,18 +294,53 @@ def save_incentive_titles(df: pd.DataFrame, table_name: str = INCENTIVE_TITLES_T
         df.to_sql(table_name, conn, if_exists="replace", index=False)
 
 
+def _find_column(df: pd.DataFrame, candidates: list[str], required: bool = True) -> str | None:
+    """Find a DataFrame column by trying exact matches, then case-insensitive/stripped matches."""
+    cols = list(df.columns)
+
+    # Exact match
+    for candidate in candidates:
+        if candidate in cols:
+            return candidate
+
+    # Case-insensitive + stripped match
+    cols_lower = {col.strip().lower(): col for col in cols}
+    for candidate in candidates:
+        key = candidate.strip().lower()
+        if key in cols_lower:
+            return cols_lower[key]
+
+    if required:
+        raise KeyError(
+            f"Nenhuma coluna encontrada para {candidates}. "
+            f"Colunas disponíveis: {cols}"
+        )
+    return None
+
+
 def save_model_fat_rates(df: pd.DataFrame) -> int:
     """Replace faturamento commission percentages by model."""
     ensure_commission_tables()
-    prepared = df.rename(
-        columns={
-            "Modelo": "modelo",
-            "% Comissão Fat.": "percentual_comissao_fat",
-            "percentual_comissao_fat": "percentual_comissao_fat",
-        }
-    ).copy()
-    prepared = prepared[["modelo", "percentual_comissao_fat"]].dropna(subset=["modelo"])
-    prepared["percentual_comissao_fat"] = pd.to_numeric(prepared["percentual_comissao_fat"], errors="coerce").fillna(0)
+
+    grupo_col = _find_column(df, ["Grupo", "grupo", "GRUPO"], required=False)
+    modelo_col = _find_column(df, ["Modelo", "modelo", "MODELO"])
+    pct_col = _find_column(df, [
+        "Percentual", "percentual", "PERCENTUAL",
+        "% Comissão Fat.", "% Comissão Fat", "% Comissao Fat.",
+        "% Comissao Fat", "percentual_comissao_fat",
+    ])
+
+    data = {
+        "modelo": df[modelo_col],
+        "percentual": df[pct_col],
+    }
+    if grupo_col:
+        data["grupo"] = df[grupo_col]
+
+    prepared = pd.DataFrame(data).dropna(subset=["modelo"])
+    prepared["percentual"] = pd.to_numeric(prepared["percentual"], errors="coerce").fillna(0)
+    if "grupo" not in prepared.columns:
+        prepared["grupo"] = None
     prepared["ativo"] = True
 
     engine = get_engine()
@@ -307,21 +355,33 @@ def save_model_fat_rates(df: pd.DataFrame) -> int:
 def save_model_margin_rates(df: pd.DataFrame) -> int:
     """Replace margin commission percentages and margin targets by model."""
     ensure_commission_tables()
-    prepared = df.rename(
-        columns={
-            "Modelo": "modelo",
-            "% Comissão Margem": "percentual_comissao_margem",
-            "Meta de Margem": "meta_margem",
-            "percentual_comissao_margem": "percentual_comissao_margem",
-        }
-    ).copy()
+
+    grupo_col = _find_column(df, ["Grupo", "grupo", "GRUPO"], required=False)
+    modelo_col = _find_column(df, ["Modelo", "modelo", "MODELO"])
+    pct_col = _find_column(df, [
+        "Percentual", "percentual", "PERCENTUAL",
+        "% Comissão Margem", "% Comissão Margem.", "% Comissao Margem",
+        "percentual_comissao_margem",
+    ])
+    meta_col = _find_column(df, [
+        "Meta de Margem", "Meta Margem", "meta_margem",
+    ], required=False)
+
+    data = {
+        "modelo": df[modelo_col],
+        "percentual": df[pct_col],
+    }
+    if grupo_col:
+        data["grupo"] = df[grupo_col]
+    if meta_col:
+        data["meta_margem"] = df[meta_col]
+
+    prepared = pd.DataFrame(data).dropna(subset=["modelo"])
+    prepared["percentual"] = pd.to_numeric(prepared["percentual"], errors="coerce").fillna(0)
+    if "grupo" not in prepared.columns:
+        prepared["grupo"] = None
     if "meta_margem" not in prepared.columns:
         prepared["meta_margem"] = 0
-    prepared = prepared[["modelo", "percentual_comissao_margem", "meta_margem"]].dropna(subset=["modelo"])
-    prepared["percentual_comissao_margem"] = pd.to_numeric(
-        prepared["percentual_comissao_margem"],
-        errors="coerce",
-    ).fillna(0)
     prepared["meta_margem"] = pd.to_numeric(prepared["meta_margem"], errors="coerce").fillna(0)
     prepared["ativo"] = True
 
@@ -332,3 +392,4 @@ def save_model_margin_rates(df: pd.DataFrame) -> int:
         conn.execute(text(f"DELETE FROM {MARGIN_RATE_TABLE}"))
         prepared.to_sql(MARGIN_RATE_TABLE, conn, if_exists="append", index=False)
     return len(prepared)
+
