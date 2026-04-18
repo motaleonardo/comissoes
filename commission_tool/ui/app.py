@@ -14,6 +14,14 @@ from dotenv import load_dotenv
 from commission_tool.config import DISPLAY_COLUMNS, STATUS_APTO, STATUS_NAO_APTO, STATUS_VERIFICAR
 from commission_tool.core.eligibility import diagnose_key_formats, run_eligibility_validation
 from commission_tool.core.formatting import format_currency_br, format_percent_br
+from commission_tool.core.paid_audit import (
+    FAT_RATE_PERCENT_COLUMNS,
+    MARGIN_RATE_PERCENT_COLUMNS,
+    build_extraction_key_set,
+    build_rate_lookup,
+    normalize_commission_report_df,
+    validate_paid_commission_file,
+)
 from commission_tool.core.periods import MONTH_NAMES_PT, build_period_options, default_base_period
 from commission_tool.data.pipeline import (
     extract_incentive_titles,
@@ -22,7 +30,10 @@ from commission_tool.data.pipeline import (
     extract_machine_source_audit,
 )
 from commission_tool.data.sources.postgres import (
+    append_model_fat_rates,
+    append_model_margin_rates,
     ensure_commission_tables,
+    get_paid_commissions_schema_status,
     read_paid_commissions,
     save_incentive_titles,
     save_model_fat_rates,
@@ -285,7 +296,7 @@ def render_sidebar() -> str:
         st.markdown("### Processo")
         return st.radio(
             "Selecione a visão",
-            options=["Apurações", "Comissões pagas", "Relatórios", "Configurações"],
+            options=["Apurações", "Auditoria", "Comissões pagas", "Relatórios", "Configurações"],
             label_visibility="collapsed",
         )
 
@@ -387,6 +398,220 @@ def render_paid_commissions_view() -> None:
                 st.success(f"{saved_count} linhas históricas importadas em comissoespagas.")
         except Exception as exc:
             st.error(f"Não foi possível importar o histórico: {exc}")
+
+
+def render_paid_audit_view() -> None:
+    st.markdown('<div class="section-title">Auditoria de Comissões Pagas</div>', unsafe_allow_html=True)
+    st.caption(
+        "Validação dos relatórios da aba 'Analitico CEN' antes de gravar na base de comissões pagas."
+    )
+
+    today = date.today()
+    periods = build_period_options(today, years_back=3, years_ahead=1)
+    period_labels = [item.label for item in periods]
+    default_label = default_base_period(today).label
+    default_index = period_labels.index(default_label) if default_label in period_labels else 0
+
+    selected_label = st.selectbox("Competência dos arquivos auditados", period_labels, index=default_index)
+    selected_period = periods[period_labels.index(selected_label)]
+
+    with st.expander("Schema Postgres da tabela comissoespagas", expanded=False):
+        if st.button("Validar colunas no Postgres", use_container_width=True):
+            try:
+                schema_status = get_paid_commissions_schema_status()
+                st.session_state.paid_audit_schema_status = schema_status
+            except Exception as exc:
+                st.error(f"Não foi possível validar o schema no Postgres: {exc}")
+        schema_status = st.session_state.get("paid_audit_schema_status")
+        if schema_status is not None:
+            missing_count = int((schema_status["status"] != "OK").sum())
+            if missing_count:
+                st.error(f"{missing_count} colunas esperadas não foram encontradas.")
+            else:
+                st.success("Colunas esperadas encontradas em comissoespagas.")
+            st.dataframe(schema_status, use_container_width=True, hide_index=True, height=260)
+
+    st.divider()
+    st.markdown("### Regras para validação")
+    col_fat_rules, col_margin_rules = st.columns(2)
+    with col_fat_rules:
+        fat_rules_file = st.file_uploader(
+            "Regras de comissão sobre faturamento",
+            type=["xlsx", "xls"],
+            key="paid_audit_fat_rules",
+        )
+        fat_rules_df = None
+        if fat_rules_file is not None:
+            fat_rules_df = pd.read_excel(fat_rules_file)
+            st.caption(f"{len(fat_rules_df)} linhas carregadas. Duplicidades serão preservadas.")
+            if st.button("Subir regras de faturamento para Postgres", use_container_width=True):
+                try:
+                    count = append_model_fat_rates(fat_rules_df)
+                    st.success(f"{count} linhas de regras de faturamento inseridas.")
+                except Exception as exc:
+                    st.error(f"Não foi possível subir regras de faturamento: {exc}")
+
+    with col_margin_rules:
+        margin_rules_file = st.file_uploader(
+            "Regras de comissão sobre margem",
+            type=["xlsx", "xls"],
+            key="paid_audit_margin_rules",
+        )
+        margin_rules_df = None
+        if margin_rules_file is not None:
+            margin_rules_df = pd.read_excel(margin_rules_file)
+            st.caption(f"{len(margin_rules_df)} linhas carregadas. Duplicidades serão preservadas.")
+            if st.button("Subir regras de margem para Postgres", use_container_width=True):
+                try:
+                    count = append_model_margin_rates(margin_rules_df)
+                    st.success(f"{count} linhas de regras de margem inseridas.")
+                except Exception as exc:
+                    st.error(f"Não foi possível subir regras de margem: {exc}")
+
+    fat_lookup = build_rate_lookup(fat_rules_df, FAT_RATE_PERCENT_COLUMNS) if fat_rules_df is not None else {}
+    margin_lookup = build_rate_lookup(margin_rules_df, MARGIN_RATE_PERCENT_COLUMNS) if margin_rules_df is not None else {}
+
+    st.divider()
+    st.markdown("### Arquivos de comissionamento")
+    uploaded_files = st.file_uploader(
+        "Relatórios de comissões pagas",
+        type=["xlsx", "xls"],
+        accept_multiple_files=True,
+        key="paid_audit_commission_files",
+        help="A aba lida será sempre 'Analitico CEN'.",
+    )
+
+    if not uploaded_files:
+        st.info("Suba um ou mais relatórios para iniciar a auditoria.")
+        return
+
+    extraction_keys = build_extraction_key_set(st.session_state.get("machine_df"))
+    if not extraction_keys:
+        st.warning("Nenhuma extração atual está carregada. Extraia o mês em Apurações antes de aprovar arquivos.")
+
+    audit_results = []
+    for uploaded_file in uploaded_files:
+        try:
+            uploaded_file.seek(0)
+            df_report = load_commission_spreadsheet(uploaded_file)
+            result = validate_paid_commission_file(
+                uploaded_file.name,
+                df_report,
+                fat_lookup,
+                margin_lookup,
+                extraction_keys,
+            )
+            audit_results.append(result)
+        except Exception as exc:
+            audit_results.append(
+                validate_paid_commission_file(
+                    uploaded_file.name,
+                    pd.DataFrame(),
+                    fat_lookup,
+                    margin_lookup,
+                    extraction_keys,
+                )
+            )
+            audit_results[-1].issues.loc[len(audit_results[-1].issues)] = {
+                "Arquivo": uploaded_file.name,
+                "Linha": "",
+                "Severidade": "Erro",
+                "Regra": "Leitura do arquivo",
+                "Detalhe": str(exc),
+            }
+            audit_results[-1].passed = False
+            audit_results[-1].error_count += 1
+
+    summary_rows = []
+    for result in audit_results:
+        summary_rows.append(
+            {
+                "Selecionar": result.passed,
+                "Arquivo": result.file_name,
+                "Status": "Aprovado" if result.passed else "Reprovado",
+                "Linhas": result.row_count,
+                "Erros": result.error_count,
+                "Avisos": result.warning_count,
+                "Valor Comissão Total": result.total_commission,
+                "6125J usado": ", ".join(f"{value:.2f}%" for value in result.summary.get("used_6125j_percentages", [])),
+                "6125J regra": ", ".join(f"{value:.2f}%" for value in result.summary.get("expected_6125j_percentages", [])),
+            }
+        )
+
+    select_all = st.checkbox("Selecionar todos os arquivos para upload", value=False)
+    summary_df = pd.DataFrame(summary_rows)
+    if select_all:
+        summary_df["Selecionar"] = True
+
+    display_summary = summary_df.copy()
+    display_summary["Valor Comissão Total"] = display_summary["Valor Comissão Total"].apply(format_currency_br)
+    edited_summary = st.data_editor(
+        display_summary,
+        use_container_width=True,
+        hide_index=True,
+        disabled=[column for column in display_summary.columns if column != "Selecionar"],
+        column_config={"Selecionar": st.column_config.CheckboxColumn("Selecionar")},
+        key="paid_audit_file_selector",
+    )
+
+    result_by_name = {result.file_name: result for result in audit_results}
+    selected_names = edited_summary.loc[edited_summary["Selecionar"] == True, "Arquivo"].tolist()
+    selected_results = [result_by_name[name] for name in selected_names]
+    failed_selected = [result for result in selected_results if not result.passed]
+
+    all_issues = pd.concat(
+        [result.issues for result in audit_results if not result.issues.empty],
+        ignore_index=True,
+    ) if any(not result.issues.empty for result in audit_results) else pd.DataFrame()
+
+    with st.expander("Detalhes das validações", expanded=not all_issues.empty):
+        if all_issues.empty:
+            st.success("Nenhuma inconsistência encontrada.")
+        else:
+            st.dataframe(all_issues, use_container_width=True, hide_index=True, height=320)
+
+    allow_failed_upload = False
+    if failed_selected:
+        st.warning(
+            f"{len(failed_selected)} arquivo(s) selecionado(s) não passaram na auditoria. "
+            "Marque a confirmação abaixo somente se quiser gravar mesmo assim."
+        )
+        allow_failed_upload = st.checkbox(
+            "Confirmo que quero subir arquivo(s) reprovado(s) para comissoespagas",
+            value=False,
+        )
+
+    if st.button("Subir arquivos selecionados para Postgres", type="primary", use_container_width=True):
+        if not selected_results:
+            st.warning("Selecione ao menos um arquivo para upload.")
+            return
+        if failed_selected and not allow_failed_upload:
+            st.error("Upload bloqueado. Confirme explicitamente para subir arquivos reprovados.")
+            return
+
+        try:
+            schema_status = get_paid_commissions_schema_status()
+            missing_schema = schema_status[schema_status["status"] != "OK"]
+            if not missing_schema.empty:
+                st.error("Upload bloqueado. A tabela comissoespagas não está com as colunas esperadas.")
+                st.dataframe(missing_schema, use_container_width=True, hide_index=True)
+                return
+
+            total_saved = 0
+            for result in selected_results:
+                total_saved += save_paid_commissions(
+                    normalize_commission_report_df(result.dataframe),
+                    competence_year=selected_period.base_year,
+                    competence_month=selected_period.base_month,
+                    period_label=selected_period.label,
+                    period_start=selected_period.start_date,
+                    period_end=selected_period.end_date,
+                    source="auditoria_excel",
+                    file_name=result.file_name,
+                )
+            st.success(f"{total_saved} linhas gravadas em comissoespagas a partir dos arquivos selecionados.")
+        except Exception as exc:
+            st.error(f"Não foi possível subir os arquivos selecionados: {exc}")
 
 
 def render_upload_area():
@@ -942,12 +1167,16 @@ def main() -> None:
         st.session_state.machine_incentive_audit_df = None
     if "paid_commissions_lookup" not in st.session_state:
         st.session_state.paid_commissions_lookup = None
+    if "paid_audit_schema_status" not in st.session_state:
+        st.session_state.paid_audit_schema_status = None
 
     render_header()
     selected_view = render_sidebar()
 
     if selected_view == "Apurações":
         render_machine_extraction()
+    elif selected_view == "Auditoria":
+        render_paid_audit_view()
     elif selected_view == "Comissões pagas":
         render_paid_commissions_view()
     elif selected_view == "Relatórios":

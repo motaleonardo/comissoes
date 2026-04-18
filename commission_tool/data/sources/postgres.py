@@ -139,7 +139,7 @@ def ensure_commission_tables() -> None:
                 CREATE TABLE IF NOT EXISTS {FAT_RATE_TABLE} (
                     id BIGSERIAL PRIMARY KEY,
                     grupo TEXT,
-                    modelo TEXT NOT NULL UNIQUE,
+                    modelo TEXT NOT NULL,
                     percentual NUMERIC(12, 6) NOT NULL DEFAULT 0,
                     ativo BOOLEAN NOT NULL DEFAULT TRUE,
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -153,7 +153,7 @@ def ensure_commission_tables() -> None:
                 CREATE TABLE IF NOT EXISTS {MARGIN_RATE_TABLE} (
                     id BIGSERIAL PRIMARY KEY,
                     grupo TEXT,
-                    modelo TEXT NOT NULL UNIQUE,
+                    modelo TEXT NOT NULL,
                     percentual NUMERIC(12, 6) NOT NULL DEFAULT 0,
                     meta_margem NUMERIC(12, 6) NOT NULL DEFAULT 0,
                     ativo BOOLEAN NOT NULL DEFAULT TRUE,
@@ -162,6 +162,8 @@ def ensure_commission_tables() -> None:
                 """
             )
         )
+        conn.execute(text(f"ALTER TABLE {FAT_RATE_TABLE} DROP CONSTRAINT IF EXISTS {FAT_RATE_TABLE}_modelo_key"))
+        conn.execute(text(f"ALTER TABLE {MARGIN_RATE_TABLE} DROP CONSTRAINT IF EXISTS {MARGIN_RATE_TABLE}_modelo_key"))
         conn.execute(
             text(
                 f"""
@@ -178,6 +180,66 @@ def ensure_commission_tables() -> None:
                 """
             )
         )
+        conn.execute(
+            text(
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_{FAT_RATE_TABLE}_modelo
+                ON {FAT_RATE_TABLE} (modelo)
+                """
+            )
+        )
+        conn.execute(
+            text(
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_{MARGIN_RATE_TABLE}_modelo
+                ON {MARGIN_RATE_TABLE} (modelo)
+                """
+            )
+        )
+
+
+def expected_paid_commissions_columns() -> list[str]:
+    return [
+        "competencia_ano",
+        "competencia_mes",
+        "mes_ano_comissao",
+        "periodo_inicio",
+        "periodo_fim",
+        "fonte",
+        "arquivo_origem",
+        *PAID_COLUMN_MAP.values(),
+    ]
+
+
+def get_paid_commissions_schema_status() -> pd.DataFrame:
+    from sqlalchemy import text
+
+    ensure_commission_tables()
+    engine = get_engine()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = :table_name
+                """
+            ),
+            {"table_name": PAID_COMMISSIONS_TABLE},
+        ).fetchall()
+
+    existing = {row[0] for row in rows}
+    expected = expected_paid_commissions_columns()
+    return pd.DataFrame(
+        [
+            {
+                "coluna": column,
+                "status": "OK" if column in existing else "Ausente",
+            }
+            for column in expected
+        ]
+    )
 
 
 def _prepare_paid_commissions_df(
@@ -318,10 +380,7 @@ def _find_column(df: pd.DataFrame, candidates: list[str], required: bool = True)
     return None
 
 
-def save_model_fat_rates(df: pd.DataFrame) -> int:
-    """Replace faturamento commission percentages by model."""
-    ensure_commission_tables()
-
+def _prepare_model_fat_rates(df: pd.DataFrame) -> pd.DataFrame:
     grupo_col = _find_column(df, ["Grupo", "grupo", "GRUPO"], required=False)
     modelo_col = _find_column(df, ["Modelo", "modelo", "MODELO"])
     pct_col = _find_column(df, [
@@ -338,10 +397,17 @@ def save_model_fat_rates(df: pd.DataFrame) -> int:
         data["grupo"] = df[grupo_col]
 
     prepared = pd.DataFrame(data).dropna(subset=["modelo"])
-    prepared["percentual"] = pd.to_numeric(prepared["percentual"], errors="coerce").fillna(0)
+    prepared["percentual"] = prepared["percentual"].apply(parse_percent_points)
     if "grupo" not in prepared.columns:
         prepared["grupo"] = None
     prepared["ativo"] = True
+    return prepared
+
+
+def save_model_fat_rates(df: pd.DataFrame) -> int:
+    """Replace faturamento commission percentages by model."""
+    ensure_commission_tables()
+    prepared = _prepare_model_fat_rates(df)
 
     engine = get_engine()
     with engine.begin() as conn:
@@ -352,10 +418,17 @@ def save_model_fat_rates(df: pd.DataFrame) -> int:
     return len(prepared)
 
 
-def save_model_margin_rates(df: pd.DataFrame) -> int:
-    """Replace margin commission percentages and margin targets by model."""
+def append_model_fat_rates(df: pd.DataFrame) -> int:
+    """Append faturamento commission percentages by model, preserving duplicates."""
     ensure_commission_tables()
+    prepared = _prepare_model_fat_rates(df)
+    engine = get_engine()
+    with engine.begin() as conn:
+        prepared.to_sql(FAT_RATE_TABLE, conn, if_exists="append", index=False)
+    return len(prepared)
 
+
+def _prepare_model_margin_rates(df: pd.DataFrame) -> pd.DataFrame:
     grupo_col = _find_column(df, ["Grupo", "grupo", "GRUPO"], required=False)
     modelo_col = _find_column(df, ["Modelo", "modelo", "MODELO"])
     pct_col = _find_column(df, [
@@ -377,13 +450,20 @@ def save_model_margin_rates(df: pd.DataFrame) -> int:
         data["meta_margem"] = df[meta_col]
 
     prepared = pd.DataFrame(data).dropna(subset=["modelo"])
-    prepared["percentual"] = pd.to_numeric(prepared["percentual"], errors="coerce").fillna(0)
+    prepared["percentual"] = prepared["percentual"].apply(parse_percent_points)
     if "grupo" not in prepared.columns:
         prepared["grupo"] = None
     if "meta_margem" not in prepared.columns:
         prepared["meta_margem"] = 0
-    prepared["meta_margem"] = pd.to_numeric(prepared["meta_margem"], errors="coerce").fillna(0)
+    prepared["meta_margem"] = prepared["meta_margem"].apply(parse_percent_points)
     prepared["ativo"] = True
+    return prepared
+
+
+def save_model_margin_rates(df: pd.DataFrame) -> int:
+    """Replace margin commission percentages and margin targets by model."""
+    ensure_commission_tables()
+    prepared = _prepare_model_margin_rates(df)
 
     engine = get_engine()
     with engine.begin() as conn:
@@ -393,3 +473,12 @@ def save_model_margin_rates(df: pd.DataFrame) -> int:
         prepared.to_sql(MARGIN_RATE_TABLE, conn, if_exists="append", index=False)
     return len(prepared)
 
+
+def append_model_margin_rates(df: pd.DataFrame) -> int:
+    """Append margin commission percentages by model, preserving duplicates."""
+    ensure_commission_tables()
+    prepared = _prepare_model_margin_rates(df)
+    engine = get_engine()
+    with engine.begin() as conn:
+        prepared.to_sql(MARGIN_RATE_TABLE, conn, if_exists="append", index=False)
+    return len(prepared)
