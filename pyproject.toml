@@ -3,5 +3,13 @@ name = "comissoes"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.14"
-dependencies = ["python-dotenv"]
+requires-python = ">=3.9"
+dependencies = [
+    "openpyxl>=3.1.0",
+    "pandas>=2.0.0",
+    "pyodbc>=5.0.0",
+    "python-dotenv",
+    "psycopg[binary]>=3.1.0",
+    "sqlalchemy>=2.0.0",
+    "streamlit>=1.32.0",
+]
