@@ -443,7 +443,9 @@ class SQLServerDataSource:
         veiculos AS (
             SELECT
                 LTRIM(RTRIM([Chassi])) AS chassi,
-                MAX(LTRIM(RTRIM([Veículo Modelo]))) AS veiculo_modelo
+                MAX(LTRIM(RTRIM([Veículo Modelo]))) AS veiculo_modelo,
+                MAX(LTRIM(RTRIM([Veículo Categoria]))) AS veiculo_categoria,
+                MAX(LTRIM(RTRIM([Veículo Estado]))) AS veiculo_estado
             FROM bdnVeiculos
             WHERE NULLIF(LTRIM(RTRIM([Chassi])), '') IS NOT NULL
             GROUP BY LTRIM(RTRIM([Chassi]))
@@ -531,10 +533,20 @@ class SQLServerDataSource:
             base.data_emissao AS [Data de Emissão],
             base.nro_documento AS [Nro Documento],
             veic.veiculo_modelo AS [Modelo],
+            veic.veiculo_categoria AS [Veículo Categoria],
+            veic.veiculo_estado AS [Veículo Estado],
             base.chassi AS [Nro Chassi],
             cli.cliente_nome AS [Nome do Cliente],
             vend.vendedor_nome AS [CEN],
-            CAST(NULL AS varchar(100)) AS [Classificação Venda],
+            CASE
+                WHEN UPPER(LTRIM(RTRIM(COALESCE(veic.veiculo_categoria, '')))) = 'IP'
+                    THEN 'Implemento'
+                WHEN UPPER(LTRIM(RTRIM(COALESCE(veic.veiculo_estado, '')))) = 'NOVO'
+                    THEN 'Maquinas JD - Novos'
+                WHEN UPPER(LTRIM(RTRIM(COALESCE(veic.veiculo_estado, '')))) = 'USADO'
+                    THEN 'Maquinas JD - Usados'
+                ELSE NULL
+            END AS [Classificação Venda],
             base.receita_bruta AS [Receita Bruta],
             CAST(0.0 AS float) AS [% Comissão Fat.],
             base.receita_bruta * 0.0 AS [Valor Comissão Fat.],

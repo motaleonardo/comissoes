@@ -21,12 +21,35 @@ class MachineCommissionQueryTests(unittest.TestCase):
         sql = read_sql.call_args.args[0]
 
         self.assertIn("veiculos AS (", sql)
+        self.assertIn("MAX(LTRIM(RTRIM([Ve\u00edculo Categoria]))) AS veiculo_categoria", sql)
+        self.assertIn("MAX(LTRIM(RTRIM([Ve\u00edculo Estado]))) AS veiculo_estado", sql)
         self.assertIn("vendedores AS (", sql)
         self.assertIn("clientes AS (", sql)
         self.assertIn("centros_custo AS (", sql)
         self.assertIn("GROUP BY LTRIM(RTRIM([Cliente C\u00f3digo]))", sql)
         self.assertIn("LEFT JOIN clientes cli", sql)
         self.assertNotIn("LEFT JOIN bdnCliente cli", sql)
+
+    def test_machine_query_classifies_sale_from_vehicle_category_and_state(self):
+        with patch(
+            "commission_tool.data.sources.sqlserver.pd.read_sql",
+            return_value=pd.DataFrame(),
+        ) as read_sql:
+            SQLServerDataSource(conn=object()).extract_machine_commission_base(
+                date(2026, 3, 16),
+                date(2026, 4, 15),
+            )
+
+        sql = read_sql.call_args.args[0]
+
+        self.assertIn("veic.veiculo_categoria AS [Ve\u00edculo Categoria]", sql)
+        self.assertIn("veic.veiculo_estado AS [Ve\u00edculo Estado]", sql)
+        self.assertIn("= 'IP'", sql)
+        self.assertIn("THEN 'Implemento'", sql)
+        self.assertIn("= 'NOVO'", sql)
+        self.assertIn("THEN 'Maquinas JD - Novos'", sql)
+        self.assertIn("= 'USADO'", sql)
+        self.assertIn("THEN 'Maquinas JD - Usados'", sql)
 
     def test_machine_query_excludes_cvd_product_codes(self):
         with patch(

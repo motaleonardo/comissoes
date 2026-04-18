@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import date
 from datetime import datetime
@@ -400,6 +401,17 @@ def render_paid_commissions_view() -> None:
             st.error(f"Não foi possível importar o histórico: {exc}")
 
 
+def infer_audit_period_label(file_name: str, period_labels: list[str], default_label: str) -> str:
+    match = re.search(r"(\d{2})[-_/](\d{2})[-_/](\d{4})", file_name)
+    if not match:
+        return default_label
+
+    month = int(match.group(2))
+    year = int(match.group(3))
+    inferred = f"{MONTH_NAMES_PT.get(month, '')}/{year}"
+    return inferred if inferred in period_labels else default_label
+
+
 def render_paid_audit_view() -> None:
     st.markdown('<div class="section-title">Auditoria de Comissões Pagas</div>', unsafe_allow_html=True)
     st.caption(
@@ -410,10 +422,6 @@ def render_paid_audit_view() -> None:
     periods = build_period_options(today, years_back=3, years_ahead=1)
     period_labels = [item.label for item in periods]
     default_label = default_base_period(today).label
-    default_index = period_labels.index(default_label) if default_label in period_labels else 0
-
-    selected_label = st.selectbox("Competência dos arquivos auditados", period_labels, index=default_index)
-    selected_period = periods[period_labels.index(selected_label)]
 
     with st.expander("Schema Postgres da tabela comissoespagas", expanded=False):
         if st.button("Validar colunas no Postgres", use_container_width=True):
@@ -485,49 +493,100 @@ def render_paid_audit_view() -> None:
         st.info("Suba um ou mais relatórios para iniciar a auditoria.")
         return
 
-    extraction_keys = build_extraction_key_set(st.session_state.get("machine_df"))
-    if not extraction_keys:
-        st.warning("Nenhuma extração atual está carregada. Extraia o mês em Apurações antes de aprovar arquivos.")
+    uploaded_names = [uploaded_file.name for uploaded_file in uploaded_files]
+    if st.session_state.get("paid_audit_uploaded_names") != uploaded_names:
+        st.session_state.paid_audit_uploaded_names = uploaded_names
+        st.session_state.paid_audit_results = None
 
-    audit_results = []
+    period_rows = []
+    previous_periods = st.session_state.get("paid_audit_period_by_file", {})
     for uploaded_file in uploaded_files:
-        try:
-            uploaded_file.seek(0)
-            df_report = load_commission_spreadsheet(uploaded_file)
-            result = validate_paid_commission_file(
-                uploaded_file.name,
-                df_report,
-                fat_lookup,
-                margin_lookup,
-                extraction_keys,
-            )
-            audit_results.append(result)
-        except Exception as exc:
-            audit_results.append(
-                validate_paid_commission_file(
+        period_rows.append(
+            {
+                "Arquivo": uploaded_file.name,
+                "Competência": previous_periods.get(
                     uploaded_file.name,
-                    pd.DataFrame(),
+                    infer_audit_period_label(uploaded_file.name, period_labels, default_label),
+                ),
+            }
+        )
+
+    st.markdown("**Competência por arquivo**")
+    period_df = pd.DataFrame(period_rows)
+    edited_period_df = st.data_editor(
+        period_df,
+        use_container_width=True,
+        hide_index=True,
+        disabled=["Arquivo"],
+        column_config={
+            "Competência": st.column_config.SelectboxColumn(
+                "Competência",
+                options=period_labels,
+                required=True,
+            )
+        },
+        key="paid_audit_period_editor",
+    )
+    updated_periods = dict(st.session_state.get("paid_audit_period_by_file", {}))
+    updated_periods.update(dict(zip(edited_period_df["Arquivo"], edited_period_df["Competência"])))
+    st.session_state.paid_audit_period_by_file = updated_periods
+
+    if st.button("Iniciar auditoria", type="primary", use_container_width=True):
+        period_by_file = dict(zip(edited_period_df["Arquivo"], edited_period_df["Competência"]))
+        st.session_state.paid_audit_period_by_file.update(period_by_file)
+
+        extraction_keys = build_extraction_key_set(st.session_state.get("machine_df"))
+        if not extraction_keys:
+            st.warning("Nenhuma extração atual está carregada. Extraia o mês em Apurações antes de aprovar arquivos.")
+
+        audit_results = []
+        for uploaded_file in uploaded_files:
+            try:
+                uploaded_file.seek(0)
+                df_report = load_commission_spreadsheet(uploaded_file)
+                result = validate_paid_commission_file(
+                    uploaded_file.name,
+                    df_report,
                     fat_lookup,
                     margin_lookup,
                     extraction_keys,
                 )
-            )
-            audit_results[-1].issues.loc[len(audit_results[-1].issues)] = {
-                "Arquivo": uploaded_file.name,
-                "Linha": "",
-                "Severidade": "Erro",
-                "Regra": "Leitura do arquivo",
-                "Detalhe": str(exc),
-            }
-            audit_results[-1].passed = False
-            audit_results[-1].error_count += 1
+                audit_results.append(result)
+            except Exception as exc:
+                audit_results.append(
+                    validate_paid_commission_file(
+                        uploaded_file.name,
+                        pd.DataFrame(),
+                        fat_lookup,
+                        margin_lookup,
+                        extraction_keys,
+                    )
+                )
+                audit_results[-1].issues.loc[len(audit_results[-1].issues)] = {
+                    "Arquivo": uploaded_file.name,
+                    "Linha": "",
+                    "Severidade": "Erro",
+                    "Regra": "Leitura do arquivo",
+                    "Detalhe": str(exc),
+                }
+                audit_results[-1].passed = False
+                audit_results[-1].error_count += 1
+
+        st.session_state.paid_audit_results = audit_results
+
+    audit_results = st.session_state.get("paid_audit_results")
+    if not audit_results:
+        st.info("Revise a competência de cada arquivo e clique em Iniciar auditoria.")
+        return
 
     summary_rows = []
+    period_by_file = st.session_state.get("paid_audit_period_by_file", {})
     for result in audit_results:
         summary_rows.append(
             {
                 "Selecionar": result.passed,
                 "Arquivo": result.file_name,
+                "Competência": period_by_file.get(result.file_name, default_label),
                 "Status": "Aprovado" if result.passed else "Reprovado",
                 "Linhas": result.row_count,
                 "Erros": result.error_count,
@@ -599,13 +658,15 @@ def render_paid_audit_view() -> None:
 
             total_saved = 0
             for result in selected_results:
+                result_period_label = period_by_file.get(result.file_name, default_label)
+                result_period = periods[period_labels.index(result_period_label)]
                 total_saved += save_paid_commissions(
                     normalize_commission_report_df(result.dataframe),
-                    competence_year=selected_period.base_year,
-                    competence_month=selected_period.base_month,
-                    period_label=selected_period.label,
-                    period_start=selected_period.start_date,
-                    period_end=selected_period.end_date,
+                    competence_year=result_period.base_year,
+                    competence_month=result_period.base_month,
+                    period_label=result_period.label,
+                    period_start=result_period.start_date,
+                    period_end=result_period.end_date,
                     source="auditoria_excel",
                     file_name=result.file_name,
                 )
@@ -1169,6 +1230,12 @@ def main() -> None:
         st.session_state.paid_commissions_lookup = None
     if "paid_audit_schema_status" not in st.session_state:
         st.session_state.paid_audit_schema_status = None
+    if "paid_audit_uploaded_names" not in st.session_state:
+        st.session_state.paid_audit_uploaded_names = []
+    if "paid_audit_results" not in st.session_state:
+        st.session_state.paid_audit_results = None
+    if "paid_audit_period_by_file" not in st.session_state:
+        st.session_state.paid_audit_period_by_file = {}
 
     render_header()
     selected_view = render_sidebar()
