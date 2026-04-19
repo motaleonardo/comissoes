@@ -64,3 +64,17 @@ def parse_percent_points(value: Any) -> float:
         return parsed * 100
     return parsed
 
+
+def parse_commission_percent_points(value: Any) -> float:
+    """Parse commission percentages as percentage points without Excel auto-scaling.
+
+    Commission spreadsheets for this project use values such as 0.45 to mean
+    0.45%, not 45%. Values above 10 are treated as legacy imports multiplied by
+    100 and converted back, e.g. 45.0 -> 0.45.
+    """
+    parsed = parse_br_number(value)
+    if parsed is None:
+        return 0.0
+    if abs(parsed) > 10:
+        return parsed / 100
+    return parsed

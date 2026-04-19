@@ -214,28 +214,29 @@ def run_eligibility_validation(
         )
         status_geral = combine_eligibility_status(v1["v1_status"], v2["v2_status"])
 
-        results.append(
-            {
-                "Filial": row.get("Filial", ""),
-                "CEN": row.get("CEN", ""),
-                "Cliente": row.get("Cliente", ""),
-                "Nro Documento": row.get("Nro Documento", ""),
-                "Nro Chassi": row.get("Nro Chassi", ""),
-                "Data de Emissão": row.get("Data de Emissão", ""),
-                "Valor Comissão": row.get("Valor Comissão Total", 0),
-                "V1 - Status": v1["v1_status"],
-                "V1 - NF Incentivo": v1["v1_nf_incentivo"],
-                "V1 - Saldo Incentivo": v1["v1_saldo"],
-                "V1 - Data Emissão": v1["v1_data_emissao"],
-                "V1 - Detalhe": v1["v1_detalhe"],
-                "V2 - Status": v2["v2_status"],
-                "V2 - Cód. Cliente": v2["v2_cliente_cod"],
-                "V2 - Saldo Cliente": v2["v2_saldo"],
-                "V2 - Tipos Título": v2["v2_tipos_titulo"],
-                "V2 - Detalhe": v2["v2_detalhe"],
-                "Status Geral": status_geral,
-            }
-        )
+        result_row = {
+            "Filial": row.get("Filial", ""),
+            "CEN": row.get("CEN", ""),
+            "Cliente": row.get("Cliente", ""),
+            "Nro Documento": row.get("Nro Documento", ""),
+            "Nro Chassi": row.get("Nro Chassi", ""),
+            "Data de Emissão": row.get("Data de Emissão", ""),
+            "Valor Comissão": row.get("Valor Comissão Total", 0),
+            "V1 - Status": v1["v1_status"],
+            "V1 - NF Incentivo": v1["v1_nf_incentivo"],
+            "V1 - Saldo Incentivo": v1["v1_saldo"],
+            "V1 - Data Emissão": v1["v1_data_emissao"],
+            "V1 - Detalhe": v1["v1_detalhe"],
+            "V2 - Status": v2["v2_status"],
+            "V2 - Cód. Cliente": v2["v2_cliente_cod"],
+            "V2 - Saldo Cliente": v2["v2_saldo"],
+            "V2 - Tipos Título": v2["v2_tipos_titulo"],
+            "V2 - Detalhe": v2["v2_detalhe"],
+            "Status Geral": status_geral,
+        }
+        if "__apuracao_row_id" in row:
+            result_row["__apuracao_row_id"] = row.get("__apuracao_row_id")
+        results.append(result_row)
 
     return pd.DataFrame(results)
 
@@ -289,4 +290,3 @@ def diagnose_key_formats(conn, df: pd.DataFrame, max_samples: int = 20):
     }
 
     return df_diag, summary
-

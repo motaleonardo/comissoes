@@ -69,6 +69,10 @@ class PaidAuditTests(unittest.TestCase):
         self.assertTrue(result.passed)
         self.assertEqual(result.error_count, 0)
         self.assertEqual(result.summary["used_6125j_percentages"], [5.0])
+        self.assertEqual(result.summary["loaded_row_count"], 1)
+        self.assertGreaterEqual(result.summary["loaded_column_count"], 9)
+        self.assertEqual(result.summary["loaded_revenue"], 10000.0)
+        self.assertEqual(result.summary["loaded_total_commission"], 600.0)
 
     def test_rejects_when_key_is_missing_from_current_extraction(self):
         report = pd.DataFrame(

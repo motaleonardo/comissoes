@@ -4,6 +4,7 @@ from datetime import date
 from commission_tool.config import STATUS_NAO_APTO, STATUS_VERIFICAR
 from commission_tool.core.eligibility import (
     combine_eligibility_status,
+    run_eligibility_validation,
     validate_customer_payment,
     validate_incentive,
 )
@@ -91,6 +92,34 @@ class EligibilityTests(unittest.TestCase):
         self.assertEqual(combine_eligibility_status("N/A", result["v2_status"]), STATUS_VERIFICAR)
 
 
+    def test_run_validation_preserves_apuracao_row_id_when_present(self):
+        import pandas as pd
+        from unittest.mock import patch
+
+        source = FakeSource()
+        source.invoices["123"] = FaturamentoRecord(
+            cliente_codigo="CLI1",
+            data_emissao=date(2026, 4, 1),
+            nota_fiscal_numero="123",
+        )
+        source.receivables[("CLI1", "123")] = [ReceivableByType(tipo_titulo="BL", saldo=0.0)]
+        df = pd.DataFrame(
+            [
+                {
+                    "__apuracao_row_id": 42,
+                    "Classificação Venda": "Implemento",
+                    "Nro Documento": "123",
+                    "Data de Emissão": date(2026, 4, 1),
+                }
+            ]
+        )
+
+        with patch("commission_tool.core.eligibility.SQLServerDataSource", return_value=source):
+            result = run_eligibility_validation(object(), df)
+
+        self.assertIn("__apuracao_row_id", result.columns)
+        self.assertEqual(result.loc[0, "__apuracao_row_id"], 42)
+
+
 if __name__ == "__main__":
     unittest.main()
-

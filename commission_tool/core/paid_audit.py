@@ -8,7 +8,7 @@ from typing import Any
 import pandas as pd
 
 from commission_tool.core.eligibility import normalize_document_padded
-from commission_tool.core.formatting import parse_br_number, parse_percent_points
+from commission_tool.core.formatting import parse_br_number, parse_commission_percent_points, parse_percent_points
 
 
 MONEY_TOLERANCE = 0.05
@@ -83,6 +83,12 @@ def safe_float(value: Any) -> float | None:
     return float(value)
 
 
+def sum_numeric_column(df: pd.DataFrame, column: str) -> float:
+    if column not in df.columns:
+        return 0.0
+    return float(df[column].apply(parse_br_number).pipe(pd.to_numeric, errors="coerce").sum())
+
+
 def normalize_commission_report_columns(df: pd.DataFrame) -> pd.DataFrame:
     normalized = df.rename(columns=REPORT_COLUMN_ALIASES).copy()
     if "Nro Documento" in normalized.columns:
@@ -132,7 +138,7 @@ def build_rate_lookup(df: pd.DataFrame, percent_candidates: list[str]) -> dict[s
     prepared = pd.DataFrame(
         {
             "modelo": df[modelo_col].apply(normalize_model),
-            "percentual": df[percent_col].apply(parse_percent_points),
+            "percentual": df[percent_col].apply(parse_commission_percent_points),
         }
     )
     prepared = prepared[prepared["modelo"].ne("")]
@@ -171,7 +177,11 @@ def validate_paid_commission_file(
     margin_rate_lookup: dict[str, set[float]],
     extraction_keys: set[tuple[str, str]],
 ) -> PaidCommissionAuditResult:
+    loaded_row_count = len(df)
+    loaded_column_count = len(df.columns)
     normalized = normalize_commission_report_df(df)
+    loaded_revenue = sum_numeric_column(normalized, "Receita Bruta")
+    loaded_total_commission = sum_numeric_column(normalized, "Valor Comissão Total")
     issues: list[dict[str, Any]] = []
 
     missing_columns = [column for column in REQUIRED_AUDIT_COLUMNS if column not in normalized.columns]
@@ -196,7 +206,14 @@ def validate_paid_commission_file(
             warning_count=0,
             total_commission=0.0,
             issues=pd.DataFrame(issues),
-            summary={"missing_columns": missing_columns},
+            summary={
+                "missing_columns": missing_columns,
+                "loaded_row_count": loaded_row_count,
+                "loaded_column_count": loaded_column_count,
+                "validated_row_count": len(normalized),
+                "loaded_revenue": loaded_revenue,
+                "loaded_total_commission": loaded_total_commission,
+            },
         )
 
     work = normalized.copy()
@@ -208,7 +225,7 @@ def validate_paid_commission_file(
     ]:
         work[column] = work[column].apply(parse_br_number)
     for column in ["% Comissão Fat.", "% Comissão Margem"]:
-        work[column] = work[column].apply(parse_percent_points)
+        work[column] = work[column].apply(parse_commission_percent_points)
 
     duplicated_keys = work.duplicated(["Nro Chassi", "Nro Documento"], keep=False)
     for index, row in work[duplicated_keys].iterrows():
@@ -372,6 +389,11 @@ def validate_paid_commission_file(
         total_commission=float(total_commission),
         issues=issues_df,
         summary={
+            "loaded_row_count": loaded_row_count,
+            "loaded_column_count": loaded_column_count,
+            "validated_row_count": len(work),
+            "loaded_revenue": loaded_revenue,
+            "loaded_total_commission": loaded_total_commission,
             "used_6125j_percentages": sorted(set(float(value) for value in rows_6125j)),
             "expected_6125j_percentages": sorted(fat_rate_lookup.get("6125J", set())),
         },

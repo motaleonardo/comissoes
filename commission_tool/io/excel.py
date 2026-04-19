@@ -25,8 +25,13 @@ def dataframe_to_excel_download(
     sheet_name: str = "Resultado Validação",
 ) -> io.BytesIO:
     buf = io.BytesIO()
+    # Excel does not support timezone-aware datetimes — strip tz info
+    df_out = df.copy()
+    for col in df_out.columns:
+        if pd.api.types.is_datetime64_any_dtype(df_out[col]):
+            df_out[col] = df_out[col].dt.tz_localize(None)
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name=sheet_name)
+        df_out.to_excel(writer, index=False, sheet_name=sheet_name)
         ws = writer.sheets[sheet_name]
         for col_cells in ws.columns:
             max_len = max((len(str(cell.value or "")) for cell in col_cells), default=10)

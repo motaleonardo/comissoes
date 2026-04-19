@@ -8,10 +8,11 @@ from urllib.parse import quote_plus
 
 import pandas as pd
 
-from commission_tool.core.formatting import parse_br_number, parse_percent_points
+from commission_tool.core.formatting import parse_br_number, parse_commission_percent_points, parse_percent_points
 
 
 PAID_COMMISSIONS_TABLE = "comissoespagas"
+EXCLUDED_COMMISSIONS_TABLE = "comissoesexcluidas"
 FAT_RATE_TABLE = "comissao_faturamento_modelo"
 MARGIN_RATE_TABLE = "comissao_margem_modelo"
 INCENTIVE_TITLES_TABLE = "commission_incentive_titles"
@@ -136,6 +137,46 @@ def ensure_commission_tables() -> None:
         conn.execute(
             text(
                 f"""
+                CREATE TABLE IF NOT EXISTS {EXCLUDED_COMMISSIONS_TABLE} (
+                    id BIGSERIAL PRIMARY KEY,
+                    paid_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    competencia_ano INTEGER NOT NULL,
+                    competencia_mes INTEGER NOT NULL,
+                    mes_ano_comissao TEXT NOT NULL,
+                    periodo_inicio DATE,
+                    periodo_fim DATE,
+                    fonte TEXT NOT NULL DEFAULT 'streamlit',
+                    arquivo_origem TEXT,
+                    tipo TEXT,
+                    filial TEXT,
+                    data_emissao DATE,
+                    nro_documento TEXT,
+                    modelo TEXT,
+                    nro_chassi TEXT,
+                    nome_cliente TEXT,
+                    cen TEXT,
+                    classificacao_venda TEXT,
+                    receita_bruta NUMERIC(18, 2),
+                    perc_comissao_fat NUMERIC(12, 6),
+                    valor_comissao_fat NUMERIC(18, 2),
+                    cmv NUMERIC(18, 2),
+                    margem_rs NUMERIC(18, 2),
+                    perc_margem_direta NUMERIC(12, 6),
+                    valor_incentivo NUMERIC(18, 2),
+                    receita_bruta_incentivos_rs NUMERIC(18, 2),
+                    margem_incentivos_rs NUMERIC(18, 2),
+                    meta_margem NUMERIC(12, 6),
+                    perc_margem_bruta NUMERIC(12, 6),
+                    perc_comissao_margem NUMERIC(12, 6),
+                    valor_comissao_margem NUMERIC(18, 2),
+                    valor_comissao_total NUMERIC(18, 2)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                f"""
                 CREATE TABLE IF NOT EXISTS {FAT_RATE_TABLE} (
                     id BIGSERIAL PRIMARY KEY,
                     grupo TEXT,
@@ -177,6 +218,22 @@ def ensure_commission_tables() -> None:
                 f"""
                 CREATE INDEX IF NOT EXISTS idx_{PAID_COMMISSIONS_TABLE}_chassi
                 ON {PAID_COMMISSIONS_TABLE} (nro_chassi)
+                """
+            )
+        )
+        conn.execute(
+            text(
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_{EXCLUDED_COMMISSIONS_TABLE}_competencia
+                ON {EXCLUDED_COMMISSIONS_TABLE} (competencia_ano, competencia_mes)
+                """
+            )
+        )
+        conn.execute(
+            text(
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_{EXCLUDED_COMMISSIONS_TABLE}_chassi
+                ON {EXCLUDED_COMMISSIONS_TABLE} (nro_chassi)
                 """
             )
         )
@@ -290,13 +347,16 @@ def _prepare_paid_commissions_df(
     ]
     for column in amount_columns:
         prepared[column] = prepared[column].apply(parse_br_number)
+        prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
     for column in percent_columns:
         prepared[column] = prepared[column].apply(parse_percent_points)
+        prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
 
     return prepared
 
 
-def save_paid_commissions(
+def _save_commission_rows(
+    table_name: str,
     df: pd.DataFrame,
     competence_year: int,
     competence_month: int,
@@ -323,8 +383,54 @@ def save_paid_commissions(
 
     engine = get_engine()
     with engine.begin() as conn:
-        prepared.to_sql(PAID_COMMISSIONS_TABLE, conn, if_exists="append", index=False)
+        prepared.to_sql(table_name, conn, if_exists="append", index=False)
     return len(prepared)
+
+
+def save_paid_commissions(
+    df: pd.DataFrame,
+    competence_year: int,
+    competence_month: int,
+    period_label: str,
+    period_start: date | None = None,
+    period_end: date | None = None,
+    source: str = "streamlit",
+    file_name: str | None = None,
+) -> int:
+    return _save_commission_rows(
+        PAID_COMMISSIONS_TABLE,
+        df,
+        competence_year,
+        competence_month,
+        period_label,
+        period_start,
+        period_end,
+        source,
+        file_name,
+    )
+
+
+def save_excluded_commissions(
+    df: pd.DataFrame,
+    competence_year: int,
+    competence_month: int,
+    period_label: str,
+    period_start: date | None = None,
+    period_end: date | None = None,
+    source: str = "streamlit_exclusao",
+    file_name: str | None = None,
+) -> int:
+    return _save_commission_rows(
+        EXCLUDED_COMMISSIONS_TABLE,
+        df,
+        competence_year,
+        competence_month,
+        period_label,
+        period_start,
+        period_end,
+        source,
+        file_name,
+    )
 
 
 def read_paid_commissions(competence_year: int, competence_month: int) -> pd.DataFrame:
@@ -346,6 +452,105 @@ def read_paid_commissions(competence_year: int, competence_month: int) -> pd.Dat
         engine,
         params={"competence_year": competence_year, "competence_month": competence_month},
     )
+
+
+def read_paid_commission_chassis_summary() -> pd.DataFrame:
+    """Read all paid commission history aggregated by chassis."""
+    from sqlalchemy import text
+
+    ensure_commission_tables()
+    engine = get_engine()
+    query = text(
+        f"""
+        SELECT
+            UPPER(TRIM(nro_chassi)) AS nro_chassi,
+            COUNT(*) AS qtd_lancamentos_pagos,
+            COALESCE(SUM(CASE WHEN valor_comissao_total > 0 THEN valor_comissao_total ELSE 0 END), 0)
+                AS valor_pago_positivo,
+            COALESCE(SUM(CASE WHEN valor_comissao_total < 0 THEN valor_comissao_total ELSE 0 END), 0)
+                AS valor_estornado_negativo,
+            COALESCE(SUM(valor_comissao_total), 0) AS saldo_comissao_paga_chassi,
+            BOOL_OR(COALESCE(valor_comissao_total, 0) > 0) AS tem_pagamento_positivo,
+            BOOL_OR(COALESCE(valor_comissao_total, 0) < 0) AS tem_estorno_negativo
+        FROM {PAID_COMMISSIONS_TABLE}
+        WHERE nro_chassi IS NOT NULL
+          AND TRIM(nro_chassi) <> ''
+        GROUP BY UPPER(TRIM(nro_chassi))
+        """
+    )
+    return pd.read_sql(query, engine)
+
+
+def read_excluded_commission_chassis_summary() -> pd.DataFrame:
+    """Read all manually excluded commission history aggregated by chassis."""
+    from sqlalchemy import text
+
+    ensure_commission_tables()
+    engine = get_engine()
+    query = text(
+        f"""
+        SELECT
+            UPPER(TRIM(nro_chassi)) AS nro_chassi,
+            COUNT(*) AS qtd_lancamentos_excluidos,
+            MAX(paid_at) AS ultima_exclusao
+        FROM {EXCLUDED_COMMISSIONS_TABLE}
+        WHERE nro_chassi IS NOT NULL
+          AND TRIM(nro_chassi) <> ''
+        GROUP BY UPPER(TRIM(nro_chassi))
+        """
+    )
+    return pd.read_sql(query, engine)
+
+
+def read_model_fat_rates() -> pd.DataFrame:
+    """Read the latest active faturamento rate per model."""
+    from sqlalchemy import text
+
+    ensure_commission_tables()
+    engine = get_engine()
+    query = text(
+        f"""
+        SELECT DISTINCT ON (UPPER(TRIM(modelo)))
+            id,
+            grupo,
+            modelo,
+            CASE WHEN ABS(percentual) > 10 THEN percentual / 100 ELSE percentual END AS percentual,
+            ativo,
+            updated_at
+        FROM {FAT_RATE_TABLE}
+        WHERE ativo IS TRUE
+          AND modelo IS NOT NULL
+          AND TRIM(modelo) <> ''
+        ORDER BY UPPER(TRIM(modelo)), updated_at DESC, id DESC
+        """
+    )
+    return pd.read_sql(query, engine)
+
+
+def read_model_margin_rates() -> pd.DataFrame:
+    """Read the latest active margin rate and margin target per model."""
+    from sqlalchemy import text
+
+    ensure_commission_tables()
+    engine = get_engine()
+    query = text(
+        f"""
+        SELECT DISTINCT ON (UPPER(TRIM(modelo)))
+            id,
+            grupo,
+            modelo,
+            CASE WHEN ABS(percentual) > 10 THEN percentual / 100 ELSE percentual END AS percentual,
+            CASE WHEN ABS(meta_margem) > 10 THEN meta_margem / 100 ELSE meta_margem END AS meta_margem,
+            ativo,
+            updated_at
+        FROM {MARGIN_RATE_TABLE}
+        WHERE ativo IS TRUE
+          AND modelo IS NOT NULL
+          AND TRIM(modelo) <> ''
+        ORDER BY UPPER(TRIM(modelo)), updated_at DESC, id DESC
+        """
+    )
+    return pd.read_sql(query, engine)
 
 
 def save_incentive_titles(df: pd.DataFrame, table_name: str = INCENTIVE_TITLES_TABLE) -> None:
@@ -397,7 +602,7 @@ def _prepare_model_fat_rates(df: pd.DataFrame) -> pd.DataFrame:
         data["grupo"] = df[grupo_col]
 
     prepared = pd.DataFrame(data).dropna(subset=["modelo"])
-    prepared["percentual"] = prepared["percentual"].apply(parse_percent_points)
+    prepared["percentual"] = prepared["percentual"].apply(parse_commission_percent_points)
     if "grupo" not in prepared.columns:
         prepared["grupo"] = None
     prepared["ativo"] = True
@@ -428,6 +633,19 @@ def append_model_fat_rates(df: pd.DataFrame) -> int:
     return len(prepared)
 
 
+def replace_active_model_fat_rates(df: pd.DataFrame) -> int:
+    """Deactivate current active faturamento rates and append a new active version."""
+    ensure_commission_tables()
+    prepared = _prepare_model_fat_rates(df)
+    engine = get_engine()
+    with engine.begin() as conn:
+        from sqlalchemy import text
+
+        conn.execute(text(f"UPDATE {FAT_RATE_TABLE} SET ativo = FALSE WHERE ativo IS TRUE"))
+        prepared.to_sql(FAT_RATE_TABLE, conn, if_exists="append", index=False)
+    return len(prepared)
+
+
 def _prepare_model_margin_rates(df: pd.DataFrame) -> pd.DataFrame:
     grupo_col = _find_column(df, ["Grupo", "grupo", "GRUPO"], required=False)
     modelo_col = _find_column(df, ["Modelo", "modelo", "MODELO"])
@@ -438,6 +656,8 @@ def _prepare_model_margin_rates(df: pd.DataFrame) -> pd.DataFrame:
     ])
     meta_col = _find_column(df, [
         "Meta de Margem", "Meta Margem", "meta_margem",
+        "% Meta de Margem", "% Meta Margem", "Meta de Margem %",
+        "Meta Margem %", "meta margem", "meta de margem",
     ], required=False)
 
     data = {
@@ -450,12 +670,12 @@ def _prepare_model_margin_rates(df: pd.DataFrame) -> pd.DataFrame:
         data["meta_margem"] = df[meta_col]
 
     prepared = pd.DataFrame(data).dropna(subset=["modelo"])
-    prepared["percentual"] = prepared["percentual"].apply(parse_percent_points)
+    prepared["percentual"] = prepared["percentual"].apply(parse_commission_percent_points)
     if "grupo" not in prepared.columns:
         prepared["grupo"] = None
     if "meta_margem" not in prepared.columns:
         prepared["meta_margem"] = 0
-    prepared["meta_margem"] = prepared["meta_margem"].apply(parse_percent_points)
+    prepared["meta_margem"] = prepared["meta_margem"].apply(parse_commission_percent_points)
     prepared["ativo"] = True
     return prepared
 
@@ -480,5 +700,18 @@ def append_model_margin_rates(df: pd.DataFrame) -> int:
     prepared = _prepare_model_margin_rates(df)
     engine = get_engine()
     with engine.begin() as conn:
+        prepared.to_sql(MARGIN_RATE_TABLE, conn, if_exists="append", index=False)
+    return len(prepared)
+
+
+def replace_active_model_margin_rates(df: pd.DataFrame) -> int:
+    """Deactivate current active margin rates and append a new active version."""
+    ensure_commission_tables()
+    prepared = _prepare_model_margin_rates(df)
+    engine = get_engine()
+    with engine.begin() as conn:
+        from sqlalchemy import text
+
+        conn.execute(text(f"UPDATE {MARGIN_RATE_TABLE} SET ativo = FALSE WHERE ativo IS TRUE"))
         prepared.to_sql(MARGIN_RATE_TABLE, conn, if_exists="append", index=False)
     return len(prepared)

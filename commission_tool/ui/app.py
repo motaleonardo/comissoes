@@ -13,6 +13,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from commission_tool.config import DISPLAY_COLUMNS, STATUS_APTO, STATUS_NAO_APTO, STATUS_VERIFICAR
+from commission_tool.core.apuracao import prepare_machine_apuracao
 from commission_tool.core.eligibility import diagnose_key_formats, run_eligibility_validation
 from commission_tool.core.formatting import format_currency_br, format_percent_br
 from commission_tool.core.paid_audit import (
@@ -35,7 +36,14 @@ from commission_tool.data.sources.postgres import (
     append_model_margin_rates,
     ensure_commission_tables,
     get_paid_commissions_schema_status,
+    read_excluded_commission_chassis_summary,
+    read_model_fat_rates,
+    read_model_margin_rates,
+    read_paid_commission_chassis_summary,
     read_paid_commissions,
+    replace_active_model_fat_rates,
+    replace_active_model_margin_rates,
+    save_excluded_commissions,
     save_incentive_titles,
     save_model_fat_rates,
     save_model_margin_rates,
@@ -59,6 +67,9 @@ CURRENCY_COLUMNS = [
     "V1 - Saldo Incentivo",
     "V2 - Saldo Cliente",
     "Saldo Incentivo",
+    "Valor Pago Histórico",
+    "Valor Estornado Histórico",
+    "Saldo Comissão Paga Chassi",
 ]
 
 PERCENT_COLUMNS = [
@@ -350,13 +361,21 @@ def render_paid_commissions_view() -> None:
             "mes_ano_comissao",
             "filial",
             "nro_documento",
+            "data_emissao",
             "nro_chassi",
-            "modelo",
+            "nome_cliente",
             "cen",
             "valor_comissao_total",
         ]
         sidebar_cols = [col for col in sidebar_cols if col in df_paid.columns]
-        st.dataframe(df_paid[sidebar_cols], use_container_width=True, height=420)
+        df_paid_display = df_paid[sidebar_cols].copy()
+        if "valor_comissao_total" in df_paid_display.columns:
+            df_paid_display["valor_comissao_total"] = df_paid_display["valor_comissao_total"].apply(format_currency_br)
+        st.dataframe(
+            df_paid_display,
+            use_container_width=True,
+            height=420,
+        )
 
         buf_paid = dataframe_to_excel_download(df_paid, sheet_name="Comissões Pagas")
         st.download_button(
@@ -588,10 +607,13 @@ def render_paid_audit_view() -> None:
                 "Arquivo": result.file_name,
                 "Competência": period_by_file.get(result.file_name, default_label),
                 "Status": "Aprovado" if result.passed else "Reprovado",
-                "Linhas": result.row_count,
+                "Linhas lidas": result.summary.get("loaded_row_count", result.row_count),
+                "Colunas lidas": result.summary.get("loaded_column_count", len(result.dataframe.columns)),
+                "Linhas validadas": result.row_count,
+                "Receita Bruta lida": result.summary.get("loaded_revenue", 0.0),
                 "Erros": result.error_count,
                 "Avisos": result.warning_count,
-                "Valor Comissão Total": result.total_commission,
+                "Valor Comissão Total lido": result.summary.get("loaded_total_commission", result.total_commission),
                 "6125J usado": ", ".join(f"{value:.2f}%" for value in result.summary.get("used_6125j_percentages", [])),
                 "6125J regra": ", ".join(f"{value:.2f}%" for value in result.summary.get("expected_6125j_percentages", [])),
             }
@@ -603,7 +625,8 @@ def render_paid_audit_view() -> None:
         summary_df["Selecionar"] = True
 
     display_summary = summary_df.copy()
-    display_summary["Valor Comissão Total"] = display_summary["Valor Comissão Total"].apply(format_currency_br)
+    for column in ["Receita Bruta lida", "Valor Comissão Total lido"]:
+        display_summary[column] = display_summary[column].apply(format_currency_br)
     edited_summary = st.data_editor(
         display_summary,
         use_container_width=True,
@@ -907,9 +930,10 @@ def render_results() -> None:
 
 def render_machine_extraction() -> None:
     st.markdown('<div class="section-title">🚜 Apuração de Máquinas</div>', unsafe_allow_html=True)
-    st.caption("Extração unificada de faturamentos e devoluções no período 16-15.")
+    st.caption("Extração histórica de faturamentos e devoluções, com cálculo e confronto de comissões pagas.")
 
     today = date.today()
+    extraction_start = date(2024, 11, 1)
     periods = build_period_options(today, years_back=1, years_ahead=1)
     labels = [period.label for period in periods]
     default_label = default_base_period(today).label
@@ -925,8 +949,11 @@ def render_machine_extraction() -> None:
     selected_period = periods[labels.index(selected_label)]
 
     st.info(
-        "Período de apuração: "
+        "Competência 16-15: "
         f"**{selected_period.start_date.strftime('%d/%m/%Y')}** até "
+        f"**{selected_period.end_date.strftime('%d/%m/%Y')}** | "
+        "Extração histórica: "
+        f"**{extraction_start.strftime('%d/%m/%Y')}** até "
         f"**{selected_period.end_date.strftime('%d/%m/%Y')}**"
     )
 
@@ -944,35 +971,65 @@ def render_machine_extraction() -> None:
         try:
             conn = get_connection(**cfg)
             with st.spinner("Extraindo faturamentos, devoluções e enriquecimentos..."):
-                df_machine = extract_machine_commission_base(
+                df_machine_raw = extract_machine_commission_base(
                     conn,
-                    selected_period.start_date,
+                    extraction_start,
                     selected_period.end_date,
                 )
                 df_incentives = extract_incentive_titles(conn)
                 df_source_audit = extract_machine_source_audit(
                     conn,
-                    selected_period.start_date,
+                    extraction_start,
                     selected_period.end_date,
                 )
                 df_incentive_audit = extract_machine_incentive_audit(
                     conn,
-                    selected_period.start_date,
+                    extraction_start,
                     selected_period.end_date,
                 )
             conn.close()
+            with st.spinner("Aplicando regras do Postgres e confrontando histórico pago..."):
+                df_fat_rates = read_model_fat_rates()
+                df_margin_rates = read_model_margin_rates()
+                df_paid_summary = read_paid_commission_chassis_summary()
+                df_excluded_summary = read_excluded_commission_chassis_summary()
+                df_machine, df_machine_history = prepare_machine_apuracao(
+                    df_machine_raw,
+                    df_fat_rates,
+                    df_margin_rates,
+                    df_paid_summary,
+                    df_excluded_summary,
+                )
             st.session_state.machine_df = df_machine
+            st.session_state.machine_full_history_df = df_machine_history
+            st.session_state.machine_rate_fat_df = df_fat_rates
+            st.session_state.machine_rate_margin_df = df_margin_rates
+            st.session_state.machine_paid_summary_df = df_paid_summary
+            st.session_state.machine_excluded_summary_df = df_excluded_summary
             st.session_state.incentive_titles_df = df_incentives
             st.session_state.machine_source_audit_df = df_source_audit
             st.session_state.machine_incentive_audit_df = df_incentive_audit
             st.session_state.machine_period_label = selected_period.label
-            st.success(f"Extração concluída: {len(df_machine)} registros.")
+            st.session_state.machine_period_start = selected_period.start_date
+            st.session_state.machine_period_end = selected_period.end_date
+            st.session_state.machine_extraction_start = extraction_start
+            st.session_state.machine_receivable_validation_df = None
+            st.session_state.machine_pay_review_df = None
+            st.session_state.machine_exclude_review_df = None
+            bloqueados = len(df_machine_history) - len(df_machine)
+            st.success(
+                f"Extração concluída: {len(df_machine)} registros para apuração "
+                f"({bloqueados} bloqueados por pagamento histórico positivo)."
+            )
         except Exception as exc:
             st.error(f"Erro durante extração de máquinas: {exc}")
 
     df_machine = st.session_state.get("machine_df")
     if df_machine is None:
         return
+    df_machine_full = st.session_state.get("machine_full_history_df")
+    if df_machine_full is None:
+        df_machine_full = df_machine
 
     st.markdown('<div class="section-title">Tabela Única de Máquinas</div>', unsafe_allow_html=True)
 
@@ -988,49 +1045,117 @@ def render_machine_extraction() -> None:
     k4.metric("Incentivos", format_currency_br(total_incentivo))
     k5.metric("Comissão Total", format_currency_br(total_comissao))
 
+    bloqueados = int(
+        pd.to_numeric(
+            df_machine_full.get(
+                "Bloqueado por Pagamento Histórico",
+                pd.Series([False] * len(df_machine_full), index=df_machine_full.index),
+            ),
+            errors="coerce",
+        ).fillna(0).sum()
+    )
+    sem_regra_fat = (
+        int((df_machine.get("Regra Comissão Fat. Encontrada") == False).sum())
+        if "Regra Comissão Fat. Encontrada" in df_machine.columns
+        else 0
+    )
+    sem_regra_margem = (
+        int((df_machine.get("Regra Comissão Margem Encontrada") == False).sum())
+        if "Regra Comissão Margem Encontrada" in df_machine.columns
+        else 0
+    )
+    st.caption(
+        f"Base histórica extraída: {len(df_machine_full)} linhas | "
+        f"Bloqueadas por pagamento histórico positivo: {bloqueados} | "
+        f"Sem regra fat.: {sem_regra_fat} | Sem regra margem: {sem_regra_margem}"
+    )
+
     render_machine_audit(
-        df_machine,
+        df_machine_full,
         st.session_state.get("machine_source_audit_df"),
         st.session_state.get("machine_incentive_audit_df"),
     )
 
+    with st.expander("Histórico confrontado com comissões pagas"):
+        history_columns = [
+            "Tipo",
+            "Filial",
+            "Data de Emissão",
+            "Nro Documento",
+            "Modelo",
+            "Nro Chassi",
+            "Valor Comissão Total",
+            "Qtd Lançamentos Pagos",
+            "Valor Pago Histórico",
+            "Valor Estornado Histórico",
+            "Saldo Comissão Paga Chassi",
+            "Qtd Lançamentos Excluídos",
+            "Bloqueado por Exclusão",
+            "Status Confronto Pagas",
+            "Bloqueado por Pagamento Histórico",
+        ]
+        history_columns = [column for column in history_columns if column in df_machine_full.columns]
+        st.dataframe(
+            format_machine_display_df(df_machine_full[history_columns]),
+            use_container_width=True,
+            height=320,
+        )
+
     editable_df = format_machine_display_df(df_machine)
     if "Pagar" not in editable_df.columns:
         editable_df.insert(0, "Pagar", False)
+    if "Excluir" not in editable_df.columns:
+        editable_df.insert(1, "Excluir", False)
 
     edited_df = st.data_editor(
         editable_df,
         use_container_width=True,
         height=450,
-        disabled=[column for column in editable_df.columns if column != "Pagar"],
+        disabled=[column for column in editable_df.columns if column not in ["Pagar", "Excluir"]],
         column_config={
             "Pagar": st.column_config.CheckboxColumn("Pagar", default=False),
+            "Excluir": st.column_config.CheckboxColumn("Excluir", default=False),
         },
         key="machine_payment_editor",
     )
     selected_indexes = edited_df.index[edited_df["Pagar"] == True]
+    excluded_indexes = edited_df.index[edited_df["Excluir"] == True]
     selected_to_pay = df_machine.loc[selected_indexes]
-    st.caption(f"{len(selected_to_pay)} comissões selecionadas para pagamento.")
+    selected_to_exclude = df_machine.loc[excluded_indexes]
+    st.caption(
+        f"{len(selected_to_pay)} comissões selecionadas para pagamento | "
+        f"{len(selected_to_exclude)} selecionadas para exclusão."
+    )
 
-    col_pay, col_schema = st.columns(2)
-    with col_pay:
-        if st.button("Pagar comissões selecionadas", type="primary", use_container_width=True):
-            if selected_to_pay.empty:
-                st.warning("Marque ao menos uma comissão para pagar.")
-            else:
-                try:
-                    saved_count = save_paid_commissions(
-                        selected_to_pay,
-                        competence_year=selected_period.base_year,
-                        competence_month=selected_period.base_month,
-                        period_label=selected_period.label,
-                        period_start=selected_period.start_date,
-                        period_end=selected_period.end_date,
-                        source="streamlit",
-                    )
-                    st.success(f"{saved_count} comissões gravadas em comissoespagas.")
-                except Exception as exc:
-                    st.error(f"Não foi possível gravar as comissões pagas: {exc}")
+    st.markdown('<div class="section-title">Validação do Contas a Receber</div>', unsafe_allow_html=True)
+    col_validate, col_schema = st.columns(2)
+    with col_validate:
+        if st.button("Validar Contas a Receber", type="primary", use_container_width=True):
+            cfg = st.session_state.conn_cfg
+            validation_input = df_machine.reset_index(drop=True).copy()
+            validation_input.insert(0, "__apuracao_row_id", validation_input.index)
+            progress = st.progress(0)
+            status = st.empty()
+
+            def progress_callback(current: int, total: int, row: pd.Series) -> None:
+                progress.progress(current / total if total else 1.0)
+                status.text(
+                    f"Validando {current}/{total} - "
+                    f"{row.get('Nro Documento', '')} / {row.get('Nro Chassi', '')}"
+                )
+
+            try:
+                conn = get_connection(**cfg)
+                validation_df = run_eligibility_validation(conn, validation_input, progress_callback)
+                conn.close()
+                st.session_state.machine_receivable_validation_df = validation_df
+                progress.empty()
+                status.empty()
+                st.success(f"Validação concluída: {len(validation_df)} registros avaliados.")
+            except Exception as exc:
+                progress.empty()
+                status.empty()
+                st.error(f"Erro durante validação do Contas a Receber: {exc}")
     with col_schema:
         if st.button("Garantir tabelas Postgres", use_container_width=True):
             try:
@@ -1038,6 +1163,138 @@ def render_machine_extraction() -> None:
                 st.success("Tabelas Postgres prontas.")
             except Exception as exc:
                 st.error(f"Não foi possível preparar as tabelas: {exc}")
+
+    validation_df = st.session_state.get("machine_receivable_validation_df")
+    if validation_df is not None and not validation_df.empty:
+        total_validado = len(validation_df)
+        aptos = int((validation_df["Status Geral"] == STATUS_APTO).sum())
+        nao_aptos = int((validation_df["Status Geral"] == STATUS_NAO_APTO).sum())
+        verificar = int((validation_df["Status Geral"] == STATUS_VERIFICAR).sum())
+        v1_pendentes = int(validation_df["V1 - Status"].isin(["NÃO APTO", "NÃO ENCONTRADO", "ERRO"]).sum())
+        v2_pendentes = int(validation_df["V2 - Status"].isin(["NÃO APTO", "NÃO ENCONTRADO", "ERRO"]).sum())
+
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Validados", total_validado)
+        c2.metric("Aptos", aptos)
+        c3.metric("Não aptos", nao_aptos)
+        c4.metric("Verificar", verificar)
+        c5.metric("Pendências V1/V2", f"{v1_pendentes}/{v2_pendentes}")
+
+        validation_display = validation_df.drop(columns=["__apuracao_row_id"], errors="ignore")
+        st.dataframe(
+            format_machine_display_df(validation_display),
+            use_container_width=True,
+            height=320,
+        )
+    else:
+        st.info("Rode a validação do Contas a Receber antes de gravar comissões pagas.")
+
+    col_pay, _ = st.columns(2)
+    with col_pay:
+        can_prepare_review = validation_df is not None and not validation_df.empty
+        if st.button(
+            "Pagar comissões selecionadas",
+            type="primary",
+            use_container_width=True,
+            disabled=not can_prepare_review,
+        ):
+            conflict_indexes = selected_indexes.intersection(excluded_indexes)
+            if len(conflict_indexes) > 0:
+                st.warning(
+                    "Existem linhas marcadas para pagar e excluir ao mesmo tempo. "
+                    "Remova uma das marcações para continuar."
+                )
+                st.session_state.machine_pay_review_df = None
+                st.session_state.machine_exclude_review_df = None
+            elif selected_to_pay.empty and selected_to_exclude.empty:
+                st.warning("Marque ao menos uma comissão para pagar ou excluir.")
+            else:
+                pay_review = selected_to_pay.copy().reset_index(drop=True)
+                exclude_review = selected_to_exclude.copy().reset_index(drop=True)
+                if not pay_review.empty:
+                    pay_review.insert(0, "Confirmar Pagamento", True)
+                if not exclude_review.empty:
+                    exclude_review.insert(0, "Confirmar Exclusão", True)
+                st.session_state.machine_pay_review_df = pay_review
+                st.session_state.machine_exclude_review_df = exclude_review
+                st.success("Tabelas de revisão geradas. Confira antes de gravar no banco.")
+
+    pay_review_df = st.session_state.get("machine_pay_review_df")
+    exclude_review_df = st.session_state.get("machine_exclude_review_df")
+    edited_pay_review = pd.DataFrame()
+    edited_exclude_review = pd.DataFrame()
+
+    if pay_review_df is not None or exclude_review_df is not None:
+        st.markdown('<div class="section-title">Revisão antes da gravação</div>', unsafe_allow_html=True)
+
+    if pay_review_df is not None and not pay_review_df.empty:
+        st.markdown("#### Comissões a pagar")
+        display_pay_review = format_machine_display_df(pay_review_df)
+        edited_pay_review = st.data_editor(
+            display_pay_review,
+            use_container_width=True,
+            height=280,
+            disabled=[column for column in display_pay_review.columns if column != "Confirmar Pagamento"],
+            column_config={
+                "Confirmar Pagamento": st.column_config.CheckboxColumn("Confirmar", default=True),
+            },
+            key="machine_pay_review_editor",
+        )
+
+    if exclude_review_df is not None and not exclude_review_df.empty:
+        st.markdown("#### Comissões a excluir")
+        display_exclude_review = format_machine_display_df(exclude_review_df)
+        edited_exclude_review = st.data_editor(
+            display_exclude_review,
+            use_container_width=True,
+            height=280,
+            disabled=[column for column in display_exclude_review.columns if column != "Confirmar Exclusão"],
+            column_config={
+                "Confirmar Exclusão": st.column_config.CheckboxColumn("Confirmar", default=True),
+            },
+            key="machine_exclude_review_editor",
+        )
+
+    if pay_review_df is not None or exclude_review_df is not None:
+        if st.button("Gravar comissões revisadas", type="primary", use_container_width=True):
+            pay_to_save = pd.DataFrame()
+            exclude_to_save = pd.DataFrame()
+            if not edited_pay_review.empty:
+                pay_to_save = pay_review_df.loc[
+                    edited_pay_review.index[edited_pay_review["Confirmar Pagamento"] == True]
+                ].drop(columns=["Confirmar Pagamento"], errors="ignore")
+            if not edited_exclude_review.empty:
+                exclude_to_save = exclude_review_df.loc[
+                    edited_exclude_review.index[edited_exclude_review["Confirmar Exclusão"] == True]
+                ].drop(columns=["Confirmar Exclusão"], errors="ignore")
+
+            try:
+                paid_count = save_paid_commissions(
+                    pay_to_save,
+                    competence_year=selected_period.base_year,
+                    competence_month=selected_period.base_month,
+                    period_label=selected_period.label,
+                    period_start=selected_period.start_date,
+                    period_end=selected_period.end_date,
+                    source="streamlit",
+                )
+                excluded_count = save_excluded_commissions(
+                    exclude_to_save,
+                    competence_year=selected_period.base_year,
+                    competence_month=selected_period.base_month,
+                    period_label=selected_period.label,
+                    period_start=selected_period.start_date,
+                    period_end=selected_period.end_date,
+                    source="streamlit_exclusao",
+                )
+                st.session_state.machine_pay_review_df = None
+                st.session_state.machine_exclude_review_df = None
+                st.success(
+                    f"{paid_count} comissões gravadas em comissoespagas e "
+                    f"{excluded_count} em comissoesexcluidas."
+                )
+            except Exception as exc:
+                st.error(f"Não foi possível gravar as comissões revisadas: {exc}")
 
     buf = dataframe_to_excel_download(df_machine, sheet_name="Apuração Máquinas")
     st.download_button(
@@ -1162,7 +1419,22 @@ def render_reports_view() -> None:
     st.write("")
 
 
-def render_settings_view() -> None:
+def prepare_rate_editor_df(df: pd.DataFrame, include_meta: bool = False) -> pd.DataFrame:
+    columns = ["grupo", "modelo", "percentual", "ativo", "updated_at"]
+    if include_meta:
+        columns = ["grupo", "modelo", "percentual", "meta_margem", "ativo", "updated_at"]
+
+    if df is None or df.empty:
+        return pd.DataFrame(columns=columns)
+
+    editor_df = df.copy()
+    for column in columns:
+        if column not in editor_df.columns:
+            editor_df[column] = None
+    return editor_df[columns].sort_values("modelo", na_position="last").reset_index(drop=True)
+
+
+def _render_settings_view_legacy() -> None:
     st.markdown('<div class="section-title">Configurações</div>', unsafe_allow_html=True)
     st.caption("Uploads e manutenção inicial dos percentuais de comissão por modelo.")
 
@@ -1187,7 +1459,7 @@ def render_settings_view() -> None:
             df_fat = pd.read_excel(fat_file)
             st.dataframe(df_fat.head(50), use_container_width=True, height=250)
             if st.button("Salvar % faturamento por modelo", use_container_width=True):
-                count = save_model_fat_rates(df_fat)
+                count = replace_active_model_fat_rates(df_fat)
                 st.success(f"{count} modelos salvos em comissao_faturamento_modelo.")
         except Exception as exc:
             st.error(f"Não foi possível salvar percentuais de faturamento: {exc}")
@@ -1204,10 +1476,145 @@ def render_settings_view() -> None:
             df_margin = pd.read_excel(margin_file)
             st.dataframe(df_margin.head(50), use_container_width=True, height=250)
             if st.button("Salvar % margem por modelo", use_container_width=True):
-                count = save_model_margin_rates(df_margin)
+                count = replace_active_model_margin_rates(df_margin)
                 st.success(f"{count} modelos salvos em comissao_margem_modelo.")
         except Exception as exc:
             st.error(f"Não foi possível salvar percentuais de margem: {exc}")
+
+
+def render_settings_view() -> None:
+    st.markdown('<div class="section-title">Configurações</div>', unsafe_allow_html=True)
+    st.caption("Uploads e manutenção dos percentuais ativos de comissão por modelo.")
+
+    col_schema, col_load = st.columns([1, 1])
+    with col_schema:
+        if st.button("Garantir tabelas Postgres", use_container_width=True):
+            try:
+                ensure_commission_tables()
+                st.success("Tabelas Postgres prontas.")
+            except Exception as exc:
+                st.error(f"Não foi possível preparar as tabelas: {exc}")
+    with col_load:
+        if st.button("Carregar regras atuais", use_container_width=True):
+            try:
+                st.session_state.settings_fat_rates_df = prepare_rate_editor_df(read_model_fat_rates())
+                st.session_state.settings_margin_rates_df = prepare_rate_editor_df(
+                    read_model_margin_rates(),
+                    include_meta=True,
+                )
+                st.success("Regras atuais carregadas do Postgres.")
+            except Exception as exc:
+                st.error(f"Não foi possível carregar as regras atuais: {exc}")
+
+    st.divider()
+    st.markdown("### Comissão sobre faturamento")
+    fat_file = st.file_uploader(
+        "Excel de % comissão sobre faturamento por Modelo",
+        type=["xlsx", "xls"],
+        key="settings_fat_rate_upload",
+    )
+    if fat_file is not None:
+        try:
+            df_fat = pd.read_excel(fat_file)
+            st.dataframe(df_fat.head(50), use_container_width=True, height=250)
+            if st.button("Salvar % faturamento por modelo", use_container_width=True):
+                count = replace_active_model_fat_rates(df_fat)
+                st.session_state.settings_fat_rates_df = prepare_rate_editor_df(read_model_fat_rates())
+                st.success(f"{count} modelos salvos em comissao_faturamento_modelo.")
+        except Exception as exc:
+            st.error(f"Não foi possível salvar percentuais de faturamento: {exc}")
+
+    st.markdown("#### Regras atuais de faturamento")
+    if st.session_state.get("settings_fat_rates_df") is None:
+        try:
+            st.session_state.settings_fat_rates_df = prepare_rate_editor_df(read_model_fat_rates())
+        except Exception as exc:
+            st.warning(f"Não foi possível carregar as regras de faturamento: {exc}")
+
+    df_fat_current = st.session_state.get("settings_fat_rates_df")
+    if df_fat_current is not None:
+        edited_fat = st.data_editor(
+            df_fat_current,
+            use_container_width=True,
+            height=320,
+            num_rows="dynamic",
+            disabled=["updated_at"],
+            column_config={
+                "grupo": st.column_config.TextColumn("Grupo"),
+                "modelo": st.column_config.TextColumn("Modelo", required=True),
+                "percentual": st.column_config.NumberColumn("% Comissão Fat.", format="%.4f"),
+                "ativo": st.column_config.CheckboxColumn("Ativo", default=True),
+                "updated_at": st.column_config.DatetimeColumn("Atualizado em"),
+            },
+            key="settings_fat_rates_editor",
+        )
+        if st.button("Salvar alterações de faturamento", type="primary", use_container_width=True):
+            try:
+                count = replace_active_model_fat_rates(edited_fat)
+                st.session_state.settings_fat_rates_df = prepare_rate_editor_df(read_model_fat_rates())
+                st.success(f"{count} regras de faturamento salvas como nova versão ativa.")
+            except Exception as exc:
+                st.error(f"Não foi possível salvar alterações de faturamento: {exc}")
+
+    st.divider()
+    st.markdown("### Comissão sobre margem")
+    margin_file = st.file_uploader(
+        "Excel de % comissão sobre margem por Modelo",
+        type=["xlsx", "xls"],
+        key="settings_margin_rate_upload",
+    )
+    if margin_file is not None:
+        try:
+            df_margin = pd.read_excel(margin_file)
+            st.dataframe(df_margin.head(50), use_container_width=True, height=250)
+            if st.button("Salvar % margem por modelo", use_container_width=True):
+                count = replace_active_model_margin_rates(df_margin)
+                st.session_state.settings_margin_rates_df = prepare_rate_editor_df(
+                    read_model_margin_rates(),
+                    include_meta=True,
+                )
+                st.success(f"{count} modelos salvos em comissao_margem_modelo.")
+        except Exception as exc:
+            st.error(f"Não foi possível salvar percentuais de margem: {exc}")
+
+    st.markdown("#### Regras atuais de margem")
+    if st.session_state.get("settings_margin_rates_df") is None:
+        try:
+            st.session_state.settings_margin_rates_df = prepare_rate_editor_df(
+                read_model_margin_rates(),
+                include_meta=True,
+            )
+        except Exception as exc:
+            st.warning(f"Não foi possível carregar as regras de margem: {exc}")
+
+    df_margin_current = st.session_state.get("settings_margin_rates_df")
+    if df_margin_current is not None:
+        edited_margin = st.data_editor(
+            df_margin_current,
+            use_container_width=True,
+            height=320,
+            num_rows="dynamic",
+            disabled=["updated_at"],
+            column_config={
+                "grupo": st.column_config.TextColumn("Grupo"),
+                "modelo": st.column_config.TextColumn("Modelo", required=True),
+                "percentual": st.column_config.NumberColumn("% Comissão Margem", format="%.4f"),
+                "meta_margem": st.column_config.NumberColumn("Meta de Margem", format="%.4f"),
+                "ativo": st.column_config.CheckboxColumn("Ativo", default=True),
+                "updated_at": st.column_config.DatetimeColumn("Atualizado em"),
+            },
+            key="settings_margin_rates_editor",
+        )
+        if st.button("Salvar alterações de margem", type="primary", use_container_width=True):
+            try:
+                count = replace_active_model_margin_rates(edited_margin)
+                st.session_state.settings_margin_rates_df = prepare_rate_editor_df(
+                    read_model_margin_rates(),
+                    include_meta=True,
+                )
+                st.success(f"{count} regras de margem salvas como nova versão ativa.")
+            except Exception as exc:
+                st.error(f"Não foi possível salvar alterações de margem: {exc}")
 
 
 def main() -> None:
@@ -1220,6 +1627,26 @@ def main() -> None:
         st.session_state.results_df = None
     if "machine_df" not in st.session_state:
         st.session_state.machine_df = None
+    if "machine_full_history_df" not in st.session_state:
+        st.session_state.machine_full_history_df = None
+    if "machine_receivable_validation_df" not in st.session_state:
+        st.session_state.machine_receivable_validation_df = None
+    if "machine_paid_summary_df" not in st.session_state:
+        st.session_state.machine_paid_summary_df = None
+    if "machine_excluded_summary_df" not in st.session_state:
+        st.session_state.machine_excluded_summary_df = None
+    if "machine_pay_review_df" not in st.session_state:
+        st.session_state.machine_pay_review_df = None
+    if "machine_exclude_review_df" not in st.session_state:
+        st.session_state.machine_exclude_review_df = None
+    if "machine_rate_fat_df" not in st.session_state:
+        st.session_state.machine_rate_fat_df = None
+    if "machine_rate_margin_df" not in st.session_state:
+        st.session_state.machine_rate_margin_df = None
+    if "settings_fat_rates_df" not in st.session_state:
+        st.session_state.settings_fat_rates_df = None
+    if "settings_margin_rates_df" not in st.session_state:
+        st.session_state.settings_margin_rates_df = None
     if "incentive_titles_df" not in st.session_state:
         st.session_state.incentive_titles_df = None
     if "machine_source_audit_df" not in st.session_state:
