@@ -44,12 +44,35 @@ class MachineCommissionQueryTests(unittest.TestCase):
 
         self.assertIn("veic.veiculo_categoria AS [Ve\u00edculo Categoria]", sql)
         self.assertIn("veic.veiculo_estado AS [Ve\u00edculo Estado]", sql)
+        self.assertIn("base.cliente_codigo AS [Cliente C\u00f3digo]", sql)
+        self.assertIn("base.vendedor_codigo AS [Cod Vendedor]", sql)
         self.assertIn("= 'IP'", sql)
         self.assertIn("THEN 'Implemento'", sql)
         self.assertIn("= 'NOVO'", sql)
         self.assertIn("THEN 'Maquinas JD - Novos'", sql)
         self.assertIn("= 'USADO'", sql)
         self.assertIn("THEN 'Maquinas JD - Usados'", sql)
+
+    def test_machine_query_calculates_margin_from_receita_bruta_and_cmv_without_taxes(self):
+        with patch(
+            "commission_tool.data.sources.sqlserver.pd.read_sql",
+            return_value=pd.DataFrame(),
+        ) as read_sql:
+            SQLServerDataSource(conn=object()).extract_machine_commission_base(
+                date(2026, 3, 16),
+                date(2026, 4, 15),
+            )
+
+        sql = read_sql.call_args.args[0]
+
+        self.assertIn("THEN CAST(COALESCE(f.[Valor Total], 0) AS float)", sql)
+        self.assertIn("- CAST(COALESCE(f.[Valor Impostos], 0) AS float)", sql)
+        self.assertIn("- CAST(COALESCE(f.[Valor Custo], 0) AS float)", sql)
+        self.assertIn("ELSE (CAST(COALESCE(f.[Valor Total], 0) AS float) * -1)", sql)
+        self.assertIn("+ CAST(COALESCE(f.[Valor Impostos], 0) AS float)", sql)
+        self.assertIn("+ CAST(COALESCE(f.[Valor Custo], 0) AS float)", sql)
+        self.assertIn("THEN CAST(COALESCE(d.[Valor Total], 0) AS float)", sql)
+        self.assertIn("ELSE (CAST(COALESCE(d.[Valor Total], 0) AS float) * -1)", sql)
 
     def test_machine_query_excludes_cvd_product_codes(self):
         with patch(

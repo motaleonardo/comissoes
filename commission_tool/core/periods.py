@@ -41,7 +41,7 @@ def build_commission_period(base_year: int, base_month: int) -> CommissionPeriod
         end_month = base_month + 1
 
     return CommissionPeriod(
-        label=f"{MONTH_NAMES_PT[base_month]}/{base_year}",
+        label=f"{MONTH_NAMES_PT[end_month]}/{end_year}",
         base_year=base_year,
         base_month=base_month,
         start_date=date(base_year, base_month, 16),

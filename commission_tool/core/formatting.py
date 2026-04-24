@@ -78,3 +78,24 @@ def parse_commission_percent_points(value: Any) -> float:
     if abs(parsed) > 10:
         return parsed / 100
     return parsed
+
+
+def parse_margin_target_percent_points(value: Any) -> float:
+    """Parse margin-target percentages into percentage points.
+
+    Margin-target spreadsheets may come from Excel decimals like `0.15` meaning
+    `15.00%`, or direct percentage-point values like `15` / `15%`.
+    """
+    if pd.isna(value):
+        return 0.0
+
+    parsed = parse_br_number(value)
+    if parsed is None:
+        return 0.0
+
+    is_percent_string = isinstance(value, str) and "%" in value
+    if is_percent_string:
+        return parsed
+    if abs(parsed) <= 1 and parsed != 0:
+        return parsed * 100
+    return parsed

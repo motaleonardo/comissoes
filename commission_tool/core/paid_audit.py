@@ -8,7 +8,12 @@ from typing import Any
 import pandas as pd
 
 from commission_tool.core.eligibility import normalize_document_padded
-from commission_tool.core.formatting import parse_br_number, parse_commission_percent_points, parse_percent_points
+from commission_tool.core.formatting import (
+    parse_br_number,
+    parse_commission_percent_points,
+    parse_margin_target_percent_points,
+    parse_percent_points,
+)
 
 
 MONEY_TOLERANCE = 0.05
@@ -30,6 +35,8 @@ REQUIRED_AUDIT_COLUMNS = [
     "Receita Bruta",
     "% Comissão Fat.",
     "Valor Comissão Fat.",
+    "Meta de Margem",
+    "% Margem Bruta",
     "% Comissão Margem",
     "Valor Comissão Margem",
     "Valor Comissão Total",
@@ -55,6 +62,18 @@ MARGIN_RATE_PERCENT_COLUMNS = [
     "% Comissao Margem.",
     "percentual",
     "percentual_comissao_margem",
+]
+
+MARGIN_RATE_META_COLUMNS = [
+    "Meta",
+    "meta",
+    "Meta de Margem",
+    "Meta Margem",
+    "meta_margem",
+    "% Meta de Margem",
+    "% Meta Margem",
+    "Meta de Margem %",
+    "Meta Margem %",
 ]
 
 
@@ -149,6 +168,35 @@ def build_rate_lookup(df: pd.DataFrame, percent_candidates: list[str]) -> dict[s
     return lookup
 
 
+def build_margin_rule_lookup(df: pd.DataFrame | None) -> dict[str, dict[str, set[float]]]:
+    if df is None or df.empty:
+        return {}
+
+    modelo_col = find_column(df, ["Modelo", "modelo", "MODELO"])
+    percent_col = find_column(df, MARGIN_RATE_PERCENT_COLUMNS)
+    meta_col = find_column(df, MARGIN_RATE_META_COLUMNS, required=False)
+
+    prepared = pd.DataFrame(
+        {
+            "modelo": df[modelo_col].apply(normalize_model),
+            "percentual": df[percent_col].apply(parse_commission_percent_points),
+            "meta_margem": (
+                df[meta_col].apply(parse_margin_target_percent_points)
+                if meta_col
+                else 0.0
+            ),
+        }
+    )
+    prepared = prepared[prepared["modelo"].ne("")]
+
+    lookup: dict[str, dict[str, set[float]]] = {}
+    for row in prepared.itertuples(index=False):
+        model_lookup = lookup.setdefault(row.modelo, {"percentuais": set(), "metas": set()})
+        model_lookup["percentuais"].add(float(row.percentual))
+        model_lookup["metas"].add(float(row.meta_margem))
+    return lookup
+
+
 def build_extraction_key_set(df_machine: pd.DataFrame | None) -> set[tuple[str, str]]:
     if df_machine is None or df_machine.empty:
         return set()
@@ -174,7 +222,7 @@ def validate_paid_commission_file(
     file_name: str,
     df: pd.DataFrame,
     fat_rate_lookup: dict[str, set[float]],
-    margin_rate_lookup: dict[str, set[float]],
+    margin_rule_lookup: dict[str, dict[str, set[float]]],
     extraction_keys: set[tuple[str, str]],
 ) -> PaidCommissionAuditResult:
     loaded_row_count = len(df)
@@ -226,6 +274,8 @@ def validate_paid_commission_file(
         work[column] = work[column].apply(parse_br_number)
     for column in ["% Comissão Fat.", "% Comissão Margem"]:
         work[column] = work[column].apply(parse_commission_percent_points)
+    for column in ["Meta de Margem", "% Margem Bruta"]:
+        work[column] = work[column].apply(parse_margin_target_percent_points)
 
     duplicated_keys = work.duplicated(["Nro Chassi", "Nro Documento"], keep=False)
     for index, row in work[duplicated_keys].iterrows():
@@ -274,7 +324,12 @@ def validate_paid_commission_file(
         total_value = safe_float(row["Valor Comissão Total"])
 
         allowed_fat = fat_rate_lookup.get(modelo, set())
-        allowed_margin = margin_rate_lookup.get(modelo, set())
+        margin_rule = margin_rule_lookup.get(modelo, {})
+        allowed_margin = margin_rule.get("percentuais", set())
+        allowed_meta = margin_rule.get("metas", set())
+        margin_target = safe_float(row["Meta de Margem"]) or 0.0
+        margem_bruta = safe_float(row["% Margem Bruta"]) or 0.0
+        margin_trigger_hit = margem_bruta >= margin_target
 
         if modelo == "6125J":
             rows_6125j.append(fat_percent)
@@ -317,7 +372,18 @@ def validate_paid_commission_file(
                 }
             )
 
-        if receita not in [None, 0] and margin_value is not None:
+        if not value_matches_rule(margin_target, allowed_meta):
+            issues.append(
+                {
+                    "Arquivo": file_name,
+                    "Linha": int(index) + 2,
+                    "Severidade": "Erro",
+                    "Regra": "Meta de Margem",
+                    "Detalhe": f"Modelo {modelo}: arquivo={margin_target:.6f}, regra(s)={sorted(allowed_meta)}",
+                }
+            )
+
+        if receita not in [None, 0] and margin_value is not None and margin_trigger_hit:
             calculated_margin_percent = (margin_value / receita) * 100
             if not value_matches_rule(calculated_margin_percent, allowed_margin):
                 issues.append(
@@ -332,9 +398,24 @@ def validate_paid_commission_file(
                         ),
                     }
                 )
+        elif margin_value is not None and abs(margin_value) > MONEY_TOLERANCE:
+            issues.append(
+                {
+                    "Arquivo": file_name,
+                    "Linha": int(index) + 2,
+                    "Severidade": "Erro",
+                    "Regra": "Gatilho Comissão Margem",
+                    "Detalhe": (
+                        f"% Margem Bruta={margem_bruta:.6f} abaixo da meta={margin_target:.6f}, "
+                        f"mas Valor Comissão Margem={margin_value:.2f}"
+                    ),
+                }
+            )
 
         expected_fat_value = 0.0 if receita is None else receita * fat_percent / 100
-        expected_margin_value = 0.0 if receita is None else receita * margin_percent / 100
+        expected_margin_value = 0.0
+        if receita is not None and margin_trigger_hit:
+            expected_margin_value = receita * margin_percent / 100
         expected_total = expected_fat_value + expected_margin_value
         if total_value is None or abs(total_value - expected_total) > MONEY_TOLERANCE:
             issues.append(

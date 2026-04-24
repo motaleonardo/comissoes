@@ -217,7 +217,8 @@ def run_eligibility_validation(
         result_row = {
             "Filial": row.get("Filial", ""),
             "CEN": row.get("CEN", ""),
-            "Cliente": row.get("Cliente", ""),
+            "Cliente": row.get("Nome do Cliente", row.get("Cliente", "")),
+            "Classificação Venda": row.get("Classificação Venda", row.get("ClassificaÃ§Ã£o Venda", "")),
             "Nro Documento": row.get("Nro Documento", ""),
             "Nro Chassi": row.get("Nro Chassi", ""),
             "Data de Emissão": row.get("Data de Emissão", ""),

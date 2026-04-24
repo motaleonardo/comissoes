@@ -91,7 +91,6 @@ class EligibilityTests(unittest.TestCase):
         self.assertEqual(result["v2_status"], "ATENÇÃO")
         self.assertEqual(combine_eligibility_status("N/A", result["v2_status"]), STATUS_VERIFICAR)
 
-
     def test_run_validation_preserves_apuracao_row_id_when_present(self):
         import pandas as pd
         from unittest.mock import patch
@@ -108,6 +107,7 @@ class EligibilityTests(unittest.TestCase):
                 {
                     "__apuracao_row_id": 42,
                     "Classificação Venda": "Implemento",
+                    "Cliente": "Cliente Teste",
                     "Nro Documento": "123",
                     "Data de Emissão": date(2026, 4, 1),
                 }
@@ -119,6 +119,8 @@ class EligibilityTests(unittest.TestCase):
 
         self.assertIn("__apuracao_row_id", result.columns)
         self.assertEqual(result.loc[0, "__apuracao_row_id"], 42)
+        self.assertIn("Classificação Venda", result.columns)
+        self.assertEqual(result.loc[0, "Classificação Venda"], "Implemento")
 
 
 if __name__ == "__main__":

@@ -13,18 +13,24 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from commission_tool.config import DISPLAY_COLUMNS, STATUS_APTO, STATUS_NAO_APTO, STATUS_VERIFICAR
-from commission_tool.core.apuracao import prepare_machine_apuracao
+from commission_tool.core.apuracao import apply_frontend_default_fat_commission, prepare_machine_apuracao
 from commission_tool.core.eligibility import diagnose_key_formats, run_eligibility_validation
 from commission_tool.core.formatting import format_currency_br, format_percent_br
 from commission_tool.core.paid_audit import (
     FAT_RATE_PERCENT_COLUMNS,
     MARGIN_RATE_PERCENT_COLUMNS,
     build_extraction_key_set,
+    build_margin_rule_lookup,
     build_rate_lookup,
     normalize_commission_report_df,
     validate_paid_commission_file,
 )
 from commission_tool.core.periods import MONTH_NAMES_PT, build_period_options, default_base_period
+from commission_tool.core.reports import (
+    build_cen_report,
+    build_manager_report,
+    build_used_implements_coordinator_report,
+)
 from commission_tool.data.pipeline import (
     extract_incentive_titles,
     extract_machine_commission_base,
@@ -36,11 +42,15 @@ from commission_tool.data.sources.postgres import (
     append_model_margin_rates,
     ensure_commission_tables,
     get_paid_commissions_schema_status,
+    read_manager_relations,
     read_excluded_commission_chassis_summary,
     read_model_fat_rates,
     read_model_margin_rates,
+    read_paid_commission_period_labels,
+    read_paid_commissions_by_period_label,
     read_paid_commission_chassis_summary,
     read_paid_commissions,
+    replace_active_manager_relations,
     replace_active_model_fat_rates,
     replace_active_model_margin_rates,
     save_excluded_commissions,
@@ -70,6 +80,15 @@ CURRENCY_COLUMNS = [
     "Valor Pago Histórico",
     "Valor Estornado Histórico",
     "Saldo Comissão Paga Chassi",
+    "Comissão Faturamento",
+    "Venda Direta",
+    "Comissão Usados",
+    "Comissão Implementos",
+    "Comissão Invasão de área",
+    "Comissão Margem",
+    "Comissão Total CEN",
+    "Comissão Gerente",
+    "Valor Total da Comissão",
 ]
 
 PERCENT_COLUMNS = [
@@ -78,6 +97,8 @@ PERCENT_COLUMNS = [
     "Meta de Margem",
     "% Margem Bruta",
     "% Comissão Margem",
+    "Meta Margem",
+    "% MB Realizado",
 ]
 
 
@@ -90,6 +111,149 @@ def format_machine_display_df(df: pd.DataFrame) -> pd.DataFrame:
         if column in display_df.columns:
             display_df[column] = display_df[column].apply(format_percent_br)
     return display_df
+
+
+def build_machine_selection_editor_df(
+    df_machine: pd.DataFrame,
+    selection_state: dict[int, dict[str, bool]] | None = None,
+) -> pd.DataFrame:
+    selection_state = selection_state or {}
+    editable_df = format_machine_display_df(df_machine).copy()
+    pagar_values = []
+    excluir_values = []
+    for idx in editable_df.index:
+        row_state = selection_state.get(int(idx), {})
+        pagar_values.append(bool(row_state.get("pagar", False)))
+        excluir_values.append(bool(row_state.get("excluir", False)))
+
+    if "Pagar" in editable_df.columns:
+        editable_df["Pagar"] = pagar_values
+    else:
+        editable_df.insert(0, "Pagar", pagar_values)
+
+    if "Excluir" in editable_df.columns:
+        editable_df["Excluir"] = excluir_values
+    else:
+        editable_df.insert(1, "Excluir", excluir_values)
+
+    return editable_df
+
+
+def merge_machine_selection_state(
+    current_state: dict[int, dict[str, bool]] | None,
+    edited_df: pd.DataFrame | None,
+) -> dict[int, dict[str, bool]]:
+    merged_state = dict(current_state or {})
+    if edited_df is None or edited_df.empty:
+        return merged_state
+
+    for idx, row in edited_df.iterrows():
+        row_state = {
+            "pagar": bool(row.get("Pagar", False)),
+            "excluir": bool(row.get("Excluir", False)),
+        }
+        if row_state["pagar"] or row_state["excluir"]:
+            merged_state[int(idx)] = row_state
+        else:
+            merged_state.pop(int(idx), None)
+    return merged_state
+
+
+def get_machine_selected_rows(
+    df_machine: pd.DataFrame,
+    selection_state: dict[int, dict[str, bool]] | None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Index, pd.Index]:
+    selection_state = selection_state or {}
+    valid_indexes = set(int(idx) for idx in df_machine.index)
+    pay_indexes = sorted(
+        idx for idx, state in selection_state.items()
+        if idx in valid_indexes and state.get("pagar", False)
+    )
+    exclude_indexes = sorted(
+        idx for idx, state in selection_state.items()
+        if idx in valid_indexes and state.get("excluir", False)
+    )
+    pay_index = pd.Index(pay_indexes, dtype="int64")
+    exclude_index = pd.Index(exclude_indexes, dtype="int64")
+    selected_to_pay = df_machine.loc[pay_index] if len(pay_index) else df_machine.iloc[0:0].copy()
+    selected_to_exclude = df_machine.loc[exclude_index] if len(exclude_index) else df_machine.iloc[0:0].copy()
+    return selected_to_pay, selected_to_exclude, pay_index, exclude_index
+
+
+def build_machine_pay_review_df(selected_to_pay: pd.DataFrame) -> pd.DataFrame:
+    pay_review = selected_to_pay.copy().reset_index(drop=True)
+    if pay_review.empty:
+        return pay_review
+    pay_review.insert(0, "__pay_review_row_id", pay_review.index.astype(int))
+    pay_review.insert(1, "Confirmar Pagamento", True)
+    return pay_review
+
+
+def get_confirmed_pay_rows(
+    pay_review_df: pd.DataFrame | None,
+    edited_pay_review: pd.DataFrame | None,
+) -> pd.DataFrame:
+    if pay_review_df is None or pay_review_df.empty or edited_pay_review is None or edited_pay_review.empty:
+        return pd.DataFrame()
+
+    confirmed_ids = pd.to_numeric(
+        edited_pay_review.loc[
+            edited_pay_review["Confirmar Pagamento"] == True,
+            "__pay_review_row_id",
+        ],
+        errors="coerce",
+    ).dropna().astype(int)
+
+    if confirmed_ids.empty:
+        return pay_review_df.iloc[0:0].drop(columns=["Confirmar Pagamento", "__pay_review_row_id"], errors="ignore")
+
+    return pay_review_df.loc[
+        pay_review_df["__pay_review_row_id"].isin(confirmed_ids)
+    ].drop(columns=["Confirmar Pagamento", "__pay_review_row_id"], errors="ignore")
+
+
+def sanitize_download_label(label: str) -> str:
+    cleaned = re.sub(r'[\\/:*?"<>|]+', "_", str(label or "").strip())
+    cleaned = re.sub(r"\s+", "_", cleaned)
+    return cleaned or "periodo"
+
+
+def refresh_machine_apuracao_state() -> None:
+    df_machine_raw = st.session_state.get("machine_raw_df")
+    if df_machine_raw is None:
+        return
+
+    df_fat_rates = st.session_state.get("machine_rate_fat_df")
+    if df_fat_rates is None:
+        df_fat_rates = read_model_fat_rates()
+
+    df_margin_rates = st.session_state.get("machine_rate_margin_df")
+    if df_margin_rates is None:
+        df_margin_rates = read_model_margin_rates()
+
+    df_manager_relations = st.session_state.get("manager_relations_df")
+    if df_manager_relations is None:
+        df_manager_relations = read_manager_relations()
+
+    df_paid_summary = read_paid_commission_chassis_summary()
+    df_excluded_summary = read_excluded_commission_chassis_summary()
+    df_machine, df_machine_history = prepare_machine_apuracao(
+        df_machine_raw,
+        df_fat_rates,
+        df_margin_rates,
+        df_paid_summary,
+        df_manager_relations,
+        df_excluded_summary,
+    )
+    st.session_state.machine_df = df_machine
+    st.session_state.machine_full_history_df = df_machine_history
+    st.session_state.machine_paid_summary_df = df_paid_summary
+    st.session_state.machine_excluded_summary_df = df_excluded_summary
+    st.session_state.manager_relations_df = df_manager_relations
+    st.session_state.machine_receivable_validation_df = None
+    st.session_state.machine_pay_review_df = None
+    st.session_state.machine_exclude_review_df = None
+    st.session_state.machine_selection_state = {}
 
 
 def render_machine_audit(
@@ -236,7 +400,7 @@ def render_header() -> None:
             div[data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
         </style>
         <div class="main-header">
-            <h1>✅ Validador de Comissões</h1>
+            <h1>✅ Apuração de Comissões</h1>
             <p>Grupo Luiz Hohl - Validação de Incentivos e Pagamento de Clientes</p>
         </div>
         """,
@@ -496,7 +660,7 @@ def render_paid_audit_view() -> None:
                     st.error(f"Não foi possível subir regras de margem: {exc}")
 
     fat_lookup = build_rate_lookup(fat_rules_df, FAT_RATE_PERCENT_COLUMNS) if fat_rules_df is not None else {}
-    margin_lookup = build_rate_lookup(margin_rules_df, MARGIN_RATE_PERCENT_COLUMNS) if margin_rules_df is not None else {}
+    margin_lookup = build_margin_rule_lookup(margin_rules_df) if margin_rules_df is not None else {}
 
     st.divider()
     st.markdown("### Arquivos de comissionamento")
@@ -942,14 +1106,15 @@ def render_machine_extraction() -> None:
     col_period, col_action = st.columns([2, 1])
     with col_period:
         selected_label = st.selectbox(
-            "Mês base da comissão",
+            "Competência da comissão",
             options=labels,
             index=default_index,
         )
     selected_period = periods[labels.index(selected_label)]
 
     st.info(
-        "Competência 16-15: "
+        f"Competência: **{selected_period.label}** | "
+        "Janela 16-15: "
         f"**{selected_period.start_date.strftime('%d/%m/%Y')}** até "
         f"**{selected_period.end_date.strftime('%d/%m/%Y')}** | "
         "Extração histórica: "
@@ -991,6 +1156,7 @@ def render_machine_extraction() -> None:
             with st.spinner("Aplicando regras do Postgres e confrontando histórico pago..."):
                 df_fat_rates = read_model_fat_rates()
                 df_margin_rates = read_model_margin_rates()
+                df_manager_relations = read_manager_relations()
                 df_paid_summary = read_paid_commission_chassis_summary()
                 df_excluded_summary = read_excluded_commission_chassis_summary()
                 df_machine, df_machine_history = prepare_machine_apuracao(
@@ -998,12 +1164,15 @@ def render_machine_extraction() -> None:
                     df_fat_rates,
                     df_margin_rates,
                     df_paid_summary,
+                    df_manager_relations,
                     df_excluded_summary,
                 )
             st.session_state.machine_df = df_machine
+            st.session_state.machine_raw_df = df_machine_raw
             st.session_state.machine_full_history_df = df_machine_history
             st.session_state.machine_rate_fat_df = df_fat_rates
             st.session_state.machine_rate_margin_df = df_margin_rates
+            st.session_state.manager_relations_df = df_manager_relations
             st.session_state.machine_paid_summary_df = df_paid_summary
             st.session_state.machine_excluded_summary_df = df_excluded_summary
             st.session_state.incentive_titles_df = df_incentives
@@ -1016,10 +1185,23 @@ def render_machine_extraction() -> None:
             st.session_state.machine_receivable_validation_df = None
             st.session_state.machine_pay_review_df = None
             st.session_state.machine_exclude_review_df = None
-            bloqueados = len(df_machine_history) - len(df_machine)
+            st.session_state.machine_selection_state = {}
+            bloqueados_pagamento = int(
+                pd.to_numeric(
+                    df_machine_history.get("Bloqueado por Pagamento Histórico"),
+                    errors="coerce",
+                ).fillna(0).sum()
+            )
+            bloqueados_exclusao = int(
+                pd.to_numeric(
+                    df_machine_history.get("Bloqueado por Exclusão"),
+                    errors="coerce",
+                ).fillna(0).sum()
+            )
             st.success(
                 f"Extração concluída: {len(df_machine)} registros para apuração "
-                f"({bloqueados} bloqueados por pagamento histórico positivo)."
+                f"({bloqueados_pagamento} bloqueados por pagamento histórico positivo | "
+                f"{bloqueados_exclusao} excluídos manualmente)."
             )
         except Exception as exc:
             st.error(f"Erro durante extração de máquinas: {exc}")
@@ -1030,6 +1212,31 @@ def render_machine_extraction() -> None:
     df_machine_full = st.session_state.get("machine_full_history_df")
     if df_machine_full is None:
         df_machine_full = df_machine
+
+    use_default_fat_rate = st.toggle(
+        "Aplicar padrão de 1% quando % Comissão Fat. = 0",
+        value=st.session_state.get("machine_default_one_percent_enabled", True),
+        key="machine_default_one_percent_enabled",
+        help="Regra visual da seção Apurações. Não altera as tabelas de configuração no Postgres.",
+    )
+    previous_default_toggle = st.session_state.get("machine_default_one_percent_last")
+    if previous_default_toggle is None:
+        st.session_state.machine_default_one_percent_last = use_default_fat_rate
+    elif previous_default_toggle != use_default_fat_rate:
+        st.session_state.machine_default_one_percent_last = use_default_fat_rate
+        st.session_state.machine_receivable_validation_df = None
+        st.session_state.machine_pay_review_df = None
+        st.session_state.machine_exclude_review_df = None
+        st.session_state.machine_selection_state = {}
+        st.info("A validação e as revisões foram limpas porque a regra padrão de 1% foi alterada.")
+
+    df_machine = apply_frontend_default_fat_commission(df_machine, use_default_fat_rate)
+    default_applied_count = int(
+        pd.to_numeric(
+            df_machine.get("Padrão 1% Fat. Aplicado", pd.Series([False] * len(df_machine), index=df_machine.index)),
+            errors="coerce",
+        ).fillna(0).sum()
+    )
 
     st.markdown('<div class="section-title">Tabela Única de Máquinas</div>', unsafe_allow_html=True)
 
@@ -1067,7 +1274,20 @@ def render_machine_extraction() -> None:
     st.caption(
         f"Base histórica extraída: {len(df_machine_full)} linhas | "
         f"Bloqueadas por pagamento histórico positivo: {bloqueados} | "
-        f"Sem regra fat.: {sem_regra_fat} | Sem regra margem: {sem_regra_margem}"
+        f"Excluídas manualmente: "
+        f"{int(pd.to_numeric(df_machine_full.get('Bloqueado por Exclusão'), errors='coerce').fillna(0).sum())} | "
+        f"Sem regra fat.: {sem_regra_fat} | Sem regra margem: {sem_regra_margem} | "
+        f"Padrão 1% aplicado: {default_applied_count}"
+    )
+
+    export_period_label = sanitize_download_label(st.session_state.get("machine_period_label", selected_period.label))
+    export_buffer = dataframe_to_excel_download(df_machine, sheet_name="Apuração Máquinas")
+    st.download_button(
+        "Exportar apuração em .xlsx",
+        data=export_buffer,
+        file_name=f"apuracao_maquinas_{export_period_label}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=False,
     )
 
     render_machine_audit(
@@ -1101,68 +1321,134 @@ def render_machine_extraction() -> None:
             height=320,
         )
 
-    editable_df = format_machine_display_df(df_machine)
-    if "Pagar" not in editable_df.columns:
-        editable_df.insert(0, "Pagar", False)
-    if "Excluir" not in editable_df.columns:
-        editable_df.insert(1, "Excluir", False)
+    cen_filter_options = []
+    if "CEN" in df_machine.columns:
+        cen_filter_options = sorted(
+            value for value in df_machine["CEN"].fillna("").astype(str).str.strip().unique().tolist() if value
+        )
+
+    selected_cens = st.multiselect(
+        "Filtrar por CEN",
+        options=cen_filter_options,
+        default=[],
+        help="Filtro apenas visual. As marcações de pagar e excluir continuam valendo mesmo ao trocar o filtro.",
+    )
+
+    selection_state = st.session_state.get("machine_selection_state", {})
+    editable_df = build_machine_selection_editor_df(df_machine, selection_state)
+    visible_df = editable_df
+    if selected_cens:
+        visible_df = editable_df[
+            editable_df["CEN"].fillna("").astype(str).str.strip().isin(selected_cens)
+        ]
 
     edited_df = st.data_editor(
-        editable_df,
+        visible_df,
         use_container_width=True,
         height=450,
-        disabled=[column for column in editable_df.columns if column not in ["Pagar", "Excluir"]],
+        hide_index=True,
+        disabled=[column for column in visible_df.columns if column not in ["Pagar", "Excluir"]],
         column_config={
             "Pagar": st.column_config.CheckboxColumn("Pagar", default=False),
             "Excluir": st.column_config.CheckboxColumn("Excluir", default=False),
         },
         key="machine_payment_editor",
     )
-    selected_indexes = edited_df.index[edited_df["Pagar"] == True]
-    excluded_indexes = edited_df.index[edited_df["Excluir"] == True]
-    selected_to_pay = df_machine.loc[selected_indexes]
-    selected_to_exclude = df_machine.loc[excluded_indexes]
+    st.session_state.machine_selection_state = merge_machine_selection_state(selection_state, edited_df)
+    selected_to_pay, selected_to_exclude, selected_indexes, excluded_indexes = get_machine_selected_rows(
+        df_machine,
+        st.session_state.machine_selection_state,
+    )
+    hidden_selected_pay = max(len(selected_to_pay) - int((edited_df["Pagar"] == True).sum()) if not edited_df.empty else len(selected_to_pay), 0)
+    hidden_selected_exclude = max(len(selected_to_exclude) - int((edited_df["Excluir"] == True).sum()) if not edited_df.empty else len(selected_to_exclude), 0)
     st.caption(
         f"{len(selected_to_pay)} comissões selecionadas para pagamento | "
         f"{len(selected_to_exclude)} selecionadas para exclusão."
     )
+    if selected_cens:
+        st.caption(
+            f"Filtro ativo em {len(selected_cens)} CEN(s). "
+            f"Seleções fora da visualização atual mantidas: {hidden_selected_pay} para pagar | "
+            f"{hidden_selected_exclude} para excluir."
+        )
 
     st.markdown('<div class="section-title">Validação do Contas a Receber</div>', unsafe_allow_html=True)
-    col_validate, col_schema = st.columns(2)
+    col_exclude, col_validate = st.columns(2)
+    with col_exclude:
+        if st.button("Excluir comissões", use_container_width=True):
+            conflict_indexes = selected_indexes.intersection(excluded_indexes)
+            if len(conflict_indexes) > 0:
+                st.warning(
+                    "Existem linhas marcadas para pagar e excluir ao mesmo tempo. "
+                    "Remova uma das marcações para continuar."
+                )
+            elif selected_to_exclude.empty:
+                st.warning("Marque ao menos uma comissão para exclusão.")
+            else:
+                try:
+                    excluded_count = save_excluded_commissions(
+                        selected_to_exclude,
+                        competence_year=selected_period.base_year,
+                        competence_month=selected_period.base_month,
+                        period_label=selected_period.label,
+                        period_start=selected_period.start_date,
+                        period_end=selected_period.end_date,
+                        source="streamlit_exclusao",
+                    )
+                    refresh_machine_apuracao_state()
+                    st.success(
+                        f"{excluded_count} comissões gravadas em comissoesexcluidas "
+                        "e removidas da apuração atual."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Não foi possível excluir as comissões selecionadas: {exc}")
     with col_validate:
         if st.button("Validar Contas a Receber", type="primary", use_container_width=True):
-            cfg = st.session_state.conn_cfg
-            validation_input = df_machine.reset_index(drop=True).copy()
-            validation_input.insert(0, "__apuracao_row_id", validation_input.index)
-            progress = st.progress(0)
-            status = st.empty()
-
-            def progress_callback(current: int, total: int, row: pd.Series) -> None:
-                progress.progress(current / total if total else 1.0)
-                status.text(
-                    f"Validando {current}/{total} - "
-                    f"{row.get('Nro Documento', '')} / {row.get('Nro Chassi', '')}"
+            conflict_indexes = selected_indexes.intersection(excluded_indexes)
+            if len(conflict_indexes) > 0:
+                st.warning(
+                    "Existem linhas marcadas para pagar e excluir ao mesmo tempo. "
+                    "Remova uma das marcações para continuar."
                 )
+            elif len(excluded_indexes) > 0:
+                st.warning(
+                    "Existem comissões marcadas para exclusão. Clique em Excluir comissões "
+                    "antes de validar o Contas a Receber."
+                )
+            else:
+                cfg = st.session_state.conn_cfg
+                validation_input = df_machine.reset_index(drop=True).copy()
+                validation_input.insert(0, "__apuracao_row_id", validation_input.index)
+                progress = st.progress(0)
+                status = st.empty()
 
-            try:
-                conn = get_connection(**cfg)
-                validation_df = run_eligibility_validation(conn, validation_input, progress_callback)
-                conn.close()
-                st.session_state.machine_receivable_validation_df = validation_df
-                progress.empty()
-                status.empty()
-                st.success(f"Validação concluída: {len(validation_df)} registros avaliados.")
-            except Exception as exc:
-                progress.empty()
-                status.empty()
-                st.error(f"Erro durante validação do Contas a Receber: {exc}")
-    with col_schema:
-        if st.button("Garantir tabelas Postgres", use_container_width=True):
-            try:
-                ensure_commission_tables()
-                st.success("Tabelas Postgres prontas.")
-            except Exception as exc:
-                st.error(f"Não foi possível preparar as tabelas: {exc}")
+                def progress_callback(current: int, total: int, row: pd.Series) -> None:
+                    progress.progress(current / total if total else 1.0)
+                    status.text(
+                        f"Validando {current}/{total} - "
+                        f"{row.get('Nro Documento', '')} / {row.get('Nro Chassi', '')}"
+                    )
+
+                try:
+                    conn = get_connection(**cfg)
+                    validation_df = run_eligibility_validation(conn, validation_input, progress_callback)
+                    conn.close()
+                    st.session_state.machine_receivable_validation_df = validation_df
+                    progress.empty()
+                    status.empty()
+                    st.success(f"Validação concluída: {len(validation_df)} registros avaliados.")
+                except Exception as exc:
+                    progress.empty()
+                    status.empty()
+                    st.error(f"Erro durante validação do Contas a Receber: {exc}")
+
+    if st.button("Garantir tabelas Postgres", use_container_width=True):
+        try:
+            ensure_commission_tables()
+            st.success("Tabelas Postgres prontas.")
+        except Exception as exc:
+            st.error(f"Não foi possível preparar as tabelas: {exc}")
 
     validation_df = st.session_state.get("machine_receivable_validation_df")
     if validation_df is not None and not validation_df.empty:
@@ -1180,7 +1466,115 @@ def render_machine_extraction() -> None:
         c4.metric("Verificar", verificar)
         c5.metric("Pendências V1/V2", f"{v1_pendentes}/{v2_pendentes}")
 
-        validation_display = validation_df.drop(columns=["__apuracao_row_id"], errors="ignore")
+        status_options = [
+            status
+            for status in [STATUS_APTO, STATUS_NAO_APTO, STATUS_VERIFICAR]
+            if status in validation_df["Status Geral"].dropna().astype(str).unique().tolist()
+        ]
+        selected_validation_status = st.multiselect(
+            "Filtrar validação por Status Geral",
+            options=status_options,
+            default=[],
+        )
+
+        validation_display = validation_df.copy()
+        if "__apuracao_row_id" in validation_display.columns:
+            source_validation_fields = df_machine.reset_index(drop=True).copy()
+            source_validation_fields.insert(0, "__apuracao_row_id", source_validation_fields.index)
+            source_columns = [
+                column
+                for column in ["__apuracao_row_id", "Nome do Cliente", "Classificação Venda"]
+                if column in source_validation_fields.columns
+            ]
+            source_validation_fields = source_validation_fields[source_columns]
+            validation_display = validation_display.merge(
+                source_validation_fields,
+                on="__apuracao_row_id",
+                how="left",
+                suffixes=("", "_apuracao"),
+            )
+            if "Cliente" in validation_display.columns and "Nome do Cliente" in validation_display.columns:
+                validation_display["Nome do Cliente"] = (
+                    validation_display["Nome do Cliente"]
+                    .fillna("")
+                    .astype(str)
+                    .mask(
+                        validation_display["Nome do Cliente"].fillna("").astype(str).str.strip().eq(""),
+                        validation_display["Cliente"],
+                    )
+                )
+            elif "Cliente" in validation_display.columns and "Nome do Cliente" not in validation_display.columns:
+                validation_display["Nome do Cliente"] = validation_display["Cliente"]
+
+            if "Classificação Venda_apuracao" in validation_display.columns:
+                if "Classificação Venda" in validation_display.columns:
+                    validation_display["Classificação Venda"] = (
+                        validation_display["Classificação Venda"]
+                        .fillna("")
+                        .astype(str)
+                        .mask(
+                            validation_display["Classificação Venda"].fillna("").astype(str).str.strip().eq(""),
+                            validation_display["Classificação Venda_apuracao"],
+                        )
+                    )
+                else:
+                    validation_display["Classificação Venda"] = validation_display["Classificação Venda_apuracao"]
+                validation_display = validation_display.drop(columns=["Classificação Venda_apuracao"])
+
+        validation_display = validation_display.drop(columns=["__apuracao_row_id"], errors="ignore").copy()
+        if "Nome do Cliente" not in validation_display.columns and "Cliente" in validation_display.columns:
+            validation_display.insert(
+                validation_display.columns.get_loc("Cliente") + 1,
+                "Nome do Cliente",
+                validation_display["Cliente"],
+            )
+            validation_display = validation_display.drop(columns=["Cliente"])
+
+        if selected_validation_status:
+            validation_display = validation_display[
+                validation_display["Status Geral"].isin(selected_validation_status)
+            ].reset_index(drop=True)
+
+        validation_order = [
+            "Status Geral",
+            "Filial",
+            "CEN",
+            "Nome do Cliente",
+            "Classificação Venda",
+            "Nro Documento",
+            "Nro Chassi",
+            "Data de Emissão",
+            "Valor Comissão",
+            "V1 - Status",
+            "V1 - NF Incentivo",
+            "V1 - Saldo Incentivo",
+            "V1 - Data Emissão",
+            "V1 - Detalhe",
+            "V2 - Status",
+            "V2 - Cód. Cliente",
+            "V2 - Saldo Cliente",
+            "V2 - Tipos Título",
+            "V2 - Detalhe",
+        ]
+        ordered_columns = [column for column in validation_order if column in validation_display.columns]
+        remaining_columns = [column for column in validation_display.columns if column not in ordered_columns]
+        validation_display = validation_display[ordered_columns + remaining_columns]
+
+        export_validation = dataframe_to_excel_download(
+            validation_display,
+            sheet_name="Validacao Contas Receber",
+        )
+        export_period_label = sanitize_download_label(
+            st.session_state.get("machine_period_label", selected_period.label)
+        )
+        st.download_button(
+            "Exportar validação em .xlsx",
+            data=export_validation,
+            file_name=f"validacao_contas_receber_{export_period_label}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=False,
+        )
+        st.caption(f"Exibindo {len(validation_display)} de {total_validado} registros validados.")
         st.dataframe(
             format_machine_display_df(validation_display),
             use_container_width=True,
@@ -1206,67 +1600,57 @@ def render_machine_extraction() -> None:
                 )
                 st.session_state.machine_pay_review_df = None
                 st.session_state.machine_exclude_review_df = None
-            elif selected_to_pay.empty and selected_to_exclude.empty:
-                st.warning("Marque ao menos uma comissão para pagar ou excluir.")
+            elif len(excluded_indexes) > 0:
+                st.warning(
+                    "Existem comissões marcadas para exclusão. Clique em Excluir comissões "
+                    "antes de preparar o pagamento."
+                )
+                st.session_state.machine_pay_review_df = None
+                st.session_state.machine_exclude_review_df = None
+            elif selected_to_pay.empty:
+                st.warning("Marque ao menos uma comissão para pagamento.")
             else:
-                pay_review = selected_to_pay.copy().reset_index(drop=True)
-                exclude_review = selected_to_exclude.copy().reset_index(drop=True)
-                if not pay_review.empty:
-                    pay_review.insert(0, "Confirmar Pagamento", True)
-                if not exclude_review.empty:
-                    exclude_review.insert(0, "Confirmar Exclusão", True)
+                pay_review = build_machine_pay_review_df(selected_to_pay)
                 st.session_state.machine_pay_review_df = pay_review
-                st.session_state.machine_exclude_review_df = exclude_review
-                st.success("Tabelas de revisão geradas. Confira antes de gravar no banco.")
+                st.session_state.machine_exclude_review_df = None
+                st.success("Tabela de revisão gerada. Confira antes de gravar no banco.")
 
     pay_review_df = st.session_state.get("machine_pay_review_df")
-    exclude_review_df = st.session_state.get("machine_exclude_review_df")
     edited_pay_review = pd.DataFrame()
-    edited_exclude_review = pd.DataFrame()
 
-    if pay_review_df is not None or exclude_review_df is not None:
+    if pay_review_df is not None:
         st.markdown('<div class="section-title">Revisão antes da gravação</div>', unsafe_allow_html=True)
 
     if pay_review_df is not None and not pay_review_df.empty:
         st.markdown("#### Comissões a pagar")
+        review_receita = pd.to_numeric(pay_review_df.get("Receita Bruta"), errors="coerce").fillna(0).sum()
+        review_margem = pd.to_numeric(pay_review_df.get("Margem R$"), errors="coerce").fillna(0).sum()
+        review_comissao = pd.to_numeric(pay_review_df.get("Valor Comissão Total"), errors="coerce").fillna(0).sum()
+        review_k1, review_k2, review_k3 = st.columns(3)
+        review_k1.metric("Receita Bruta", format_currency_br(review_receita))
+        review_k2.metric("Margem R$", format_currency_br(review_margem))
+        review_k3.metric("Comissão Total", format_currency_br(review_comissao))
         display_pay_review = format_machine_display_df(pay_review_df)
         edited_pay_review = st.data_editor(
             display_pay_review,
             use_container_width=True,
             height=280,
-            disabled=[column for column in display_pay_review.columns if column != "Confirmar Pagamento"],
+            hide_index=True,
+            disabled=[
+                column
+                for column in display_pay_review.columns
+                if column not in ["Confirmar Pagamento", "__pay_review_row_id"]
+            ],
             column_config={
                 "Confirmar Pagamento": st.column_config.CheckboxColumn("Confirmar", default=True),
+                "__pay_review_row_id": None,
             },
             key="machine_pay_review_editor",
         )
 
-    if exclude_review_df is not None and not exclude_review_df.empty:
-        st.markdown("#### Comissões a excluir")
-        display_exclude_review = format_machine_display_df(exclude_review_df)
-        edited_exclude_review = st.data_editor(
-            display_exclude_review,
-            use_container_width=True,
-            height=280,
-            disabled=[column for column in display_exclude_review.columns if column != "Confirmar Exclusão"],
-            column_config={
-                "Confirmar Exclusão": st.column_config.CheckboxColumn("Confirmar", default=True),
-            },
-            key="machine_exclude_review_editor",
-        )
-
-    if pay_review_df is not None or exclude_review_df is not None:
+    if pay_review_df is not None:
         if st.button("Gravar comissões revisadas", type="primary", use_container_width=True):
-            pay_to_save = pd.DataFrame()
-            exclude_to_save = pd.DataFrame()
-            if not edited_pay_review.empty:
-                pay_to_save = pay_review_df.loc[
-                    edited_pay_review.index[edited_pay_review["Confirmar Pagamento"] == True]
-                ].drop(columns=["Confirmar Pagamento"], errors="ignore")
-            if not edited_exclude_review.empty:
-                exclude_to_save = exclude_review_df.loc[
-                    edited_exclude_review.index[edited_exclude_review["Confirmar Exclusão"] == True]
-                ].drop(columns=["Confirmar Exclusão"], errors="ignore")
+            pay_to_save = get_confirmed_pay_rows(pay_review_df, edited_pay_review)
 
             try:
                 paid_count = save_paid_commissions(
@@ -1278,32 +1662,11 @@ def render_machine_extraction() -> None:
                     period_end=selected_period.end_date,
                     source="streamlit",
                 )
-                excluded_count = save_excluded_commissions(
-                    exclude_to_save,
-                    competence_year=selected_period.base_year,
-                    competence_month=selected_period.base_month,
-                    period_label=selected_period.label,
-                    period_start=selected_period.start_date,
-                    period_end=selected_period.end_date,
-                    source="streamlit_exclusao",
-                )
-                st.session_state.machine_pay_review_df = None
-                st.session_state.machine_exclude_review_df = None
-                st.success(
-                    f"{paid_count} comissões gravadas em comissoespagas e "
-                    f"{excluded_count} em comissoesexcluidas."
-                )
+                refresh_machine_apuracao_state()
+                st.success(f"{paid_count} comissões gravadas em comissoespagas.")
+                st.rerun()
             except Exception as exc:
                 st.error(f"Não foi possível gravar as comissões revisadas: {exc}")
-
-    buf = dataframe_to_excel_download(df_machine, sheet_name="Apuração Máquinas")
-    st.download_button(
-        "⬇️ Exportar tabela única de máquinas",
-        data=buf,
-        file_name=f"apuracao_maquinas_{st.session_state.get('machine_period_label', 'periodo')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-    )
 
     df_incentives = st.session_state.get("incentive_titles_df")
     if df_incentives is None:
@@ -1322,7 +1685,10 @@ def render_machine_extraction() -> None:
             st.download_button(
                 "⬇️ Exportar títulos de incentivo",
                 data=buf_incentives,
-                file_name=f"titulos_incentivo_{st.session_state.get('machine_period_label', 'periodo')}.xlsx",
+                file_name=(
+                    f"titulos_incentivo_"
+                    f"{sanitize_download_label(st.session_state.get('machine_period_label', 'periodo'))}.xlsx"
+                ),
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
             )
@@ -1416,7 +1782,178 @@ def render_spreadsheet_validation_flow() -> None:
 
 def render_reports_view() -> None:
     st.markdown('<div class="section-title">Relatórios</div>', unsafe_allow_html=True)
-    st.write("")
+    st.markdown("### Relatórios de comissões")
+
+    try:
+        available_periods = read_paid_commission_period_labels()
+    except Exception as exc:
+        st.error(f"Não foi possível carregar as competências do relatório: {exc}")
+        return
+
+    if not available_periods:
+        st.info("Não há competências disponíveis em comissoespagas para gerar o relatório.")
+        return
+
+    selected_period = st.selectbox(
+        "Competência do relatório",
+        options=available_periods,
+        index=0,
+    )
+
+    if st.button("Gerar relatórios", type="primary", use_container_width=True):
+        try:
+            paid_commissions = read_paid_commissions_by_period_label(selected_period)
+            manager_relations = read_manager_relations()
+            cen_report_df, pending_report_df = build_cen_report(
+                paid_commissions,
+                manager_relations,
+                selected_period,
+            )
+            manager_report_df = build_manager_report(
+                paid_commissions,
+                manager_relations,
+                selected_period,
+            )
+            coordinator_report_df = build_used_implements_coordinator_report(
+                paid_commissions,
+                selected_period,
+            )
+            st.session_state.cen_report_df = cen_report_df
+            st.session_state.cen_pending_report_df = pending_report_df
+            st.session_state.manager_report_df = manager_report_df
+            st.session_state.coordinator_report_df = coordinator_report_df
+            st.session_state.cen_report_period = selected_period
+            st.success(
+                f"Relatórios gerados para {selected_period}: "
+                f"{len(cen_report_df)} vendedores, {len(manager_report_df)} gerentes, "
+                f"{len(coordinator_report_df)} linhas de coordenador "
+                f"e {len(pending_report_df)} pendência(s)."
+            )
+        except Exception as exc:
+            st.error(f"Não foi possível gerar os relatórios: {exc}")
+            return
+
+    cen_report_df = st.session_state.get("cen_report_df")
+    pending_report_df = st.session_state.get("cen_pending_report_df")
+    manager_report_df = st.session_state.get("manager_report_df")
+    coordinator_report_df = st.session_state.get("coordinator_report_df")
+    report_period = st.session_state.get("cen_report_period", selected_period)
+
+    if cen_report_df is None or manager_report_df is None or coordinator_report_df is None:
+        st.info("Selecione a competência e clique em Gerar relatórios.")
+        return
+
+    st.markdown("### Relatório do CEN")
+    total_cens = len(cen_report_df)
+    total_report = pd.to_numeric(cen_report_df.get("Valor Comissão Total"), errors="coerce").fillna(0).sum()
+    total_pending = 0.0 if pending_report_df is None else pd.to_numeric(
+        pending_report_df.get("Valor Comissão Total"),
+        errors="coerce",
+    ).fillna(0).sum()
+
+    metric_1, metric_2, metric_3 = st.columns(3)
+    metric_1.metric("CENs no relatório", total_cens)
+    metric_2.metric("Valor Comissão Total", format_currency_br(total_report))
+    metric_3.metric("Pendências", format_currency_br(total_pending))
+
+    report_buffer = dataframe_to_excel_download(cen_report_df, sheet_name="Relatorio CEN")
+    st.download_button(
+        "Exportar relatório CEN em .xlsx",
+        data=report_buffer,
+        file_name=f"relatorio_cen_{sanitize_download_label(report_period)}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=False,
+    )
+    st.dataframe(
+        format_machine_display_df(cen_report_df),
+        use_container_width=True,
+        height=420,
+        hide_index=True,
+    )
+
+    st.markdown("### Relatório dos Gerentes")
+    total_managers = len(manager_report_df)
+    total_manager_commission = pd.to_numeric(
+        manager_report_df.get("Comissão Gerente"),
+        errors="coerce",
+    ).fillna(0).sum()
+    total_manager_revenue = pd.to_numeric(
+        manager_report_df.get("Receita Bruta"),
+        errors="coerce",
+    ).fillna(0).sum()
+
+    manager_metric_1, manager_metric_2, manager_metric_3 = st.columns(3)
+    manager_metric_1.metric("Gerentes no relatório", total_managers)
+    manager_metric_2.metric("Receita Bruta", format_currency_br(total_manager_revenue))
+    manager_metric_3.metric("Comissão Gerente", format_currency_br(total_manager_commission))
+
+    manager_buffer = dataframe_to_excel_download(manager_report_df, sheet_name="Relatorio Gerentes")
+    st.download_button(
+        "Exportar relatório Gerentes em .xlsx",
+        data=manager_buffer,
+        file_name=f"relatorio_gerentes_{sanitize_download_label(report_period)}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=False,
+    )
+    st.dataframe(
+        format_machine_display_df(manager_report_df),
+        use_container_width=True,
+        height=360,
+        hide_index=True,
+    )
+
+    st.markdown("### Coordenador de Seminovos e Implementos")
+    total_coordinator_revenue = pd.to_numeric(
+        coordinator_report_df.get("Receita Bruta"),
+        errors="coerce",
+    ).fillna(0).sum()
+    total_coordinator_commission = pd.to_numeric(
+        coordinator_report_df.get("Valor Total da Comissão"),
+        errors="coerce",
+    ).fillna(0).sum()
+
+    coordinator_metric_1, coordinator_metric_2, coordinator_metric_3 = st.columns(3)
+    coordinator_metric_1.metric("Tipos no relatório", len(coordinator_report_df))
+    coordinator_metric_2.metric("Receita Bruta", format_currency_br(total_coordinator_revenue))
+    coordinator_metric_3.metric("Valor Total da Comissão", format_currency_br(total_coordinator_commission))
+
+    coordinator_buffer = dataframe_to_excel_download(
+        coordinator_report_df,
+        sheet_name="Coord Seminovos Implementos",
+    )
+    st.download_button(
+        "Exportar relatório Coordenador em .xlsx",
+        data=coordinator_buffer,
+        file_name=f"relatorio_coordenador_seminovos_implementos_{sanitize_download_label(report_period)}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=False,
+    )
+    st.dataframe(
+        format_machine_display_df(coordinator_report_df),
+        use_container_width=True,
+        height=260,
+        hide_index=True,
+    )
+
+    st.markdown("### Pendências de relatório")
+    if pending_report_df is None or pending_report_df.empty:
+        st.success("Nenhuma pendência encontrada para esta competência.")
+        return
+
+    pending_buffer = dataframe_to_excel_download(pending_report_df, sheet_name="Pendencias Relatorio")
+    st.download_button(
+        "Exportar pendências em .xlsx",
+        data=pending_buffer,
+        file_name=f"pendencias_relatorio_cen_{sanitize_download_label(report_period)}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=False,
+    )
+    st.dataframe(
+        format_machine_display_df(pending_report_df),
+        use_container_width=True,
+        height=320,
+        hide_index=True,
+    )
 
 
 def prepare_rate_editor_df(df: pd.DataFrame, include_meta: bool = False) -> pd.DataFrame:
@@ -1432,6 +1969,33 @@ def prepare_rate_editor_df(df: pd.DataFrame, include_meta: bool = False) -> pd.D
         if column not in editor_df.columns:
             editor_df[column] = None
     return editor_df[columns].sort_values("modelo", na_position="last").reset_index(drop=True)
+
+
+def prepare_manager_relation_editor_df(df: pd.DataFrame) -> pd.DataFrame:
+    columns = [
+        "filial",
+        "gerente",
+        "cod_vendedor",
+        "cod_x",
+        "vendedor",
+        "data_nascimento",
+        "cpf",
+        "email",
+        "contato",
+        "percentual_comissao_gerente",
+        "ativo",
+        "updated_at",
+    ]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=columns)
+
+    editor_df = df.copy()
+    for column in columns:
+        if column not in editor_df.columns:
+            editor_df[column] = None
+    return editor_df[columns].sort_values(["filial", "gerente", "cod_vendedor"], na_position="last").reset_index(
+        drop=True
+    )
 
 
 def _render_settings_view_legacy() -> None:
@@ -1501,6 +2065,9 @@ def render_settings_view() -> None:
                 st.session_state.settings_margin_rates_df = prepare_rate_editor_df(
                     read_model_margin_rates(),
                     include_meta=True,
+                )
+                st.session_state.settings_manager_relations_df = prepare_manager_relation_editor_df(
+                    read_manager_relations()
                 )
                 st.success("Regras atuais carregadas do Postgres.")
             except Exception as exc:
@@ -1615,11 +2182,73 @@ def render_settings_view() -> None:
                 st.success(f"{count} regras de margem salvas como nova versão ativa.")
             except Exception as exc:
                 st.error(f"Não foi possível salvar alterações de margem: {exc}")
+    st.divider()
+    st.markdown("### Relação CEN x Gerente")
+    manager_file = st.file_uploader(
+        "Excel de CEN e gestores",
+        type=["xlsx", "xls"],
+        key="settings_manager_relation_upload",
+    )
+    if manager_file is not None:
+        try:
+            df_manager = pd.read_excel(manager_file)
+            st.dataframe(df_manager.head(50), use_container_width=True, height=250)
+            if st.button("Salvar relação CEN x Gerente", use_container_width=True):
+                count = replace_active_manager_relations(df_manager)
+                st.session_state.settings_manager_relations_df = prepare_manager_relation_editor_df(
+                    read_manager_relations()
+                )
+                st.success(f"{count} vínculos salvos em comissao_gerente_vendedor.")
+        except Exception as exc:
+            st.error(f"Não foi possível salvar a relação CEN x Gerente: {exc}")
+
+    st.markdown("#### Relações atuais de CEN x Gerente")
+    if st.session_state.get("settings_manager_relations_df") is None:
+        try:
+            st.session_state.settings_manager_relations_df = prepare_manager_relation_editor_df(
+                read_manager_relations()
+            )
+        except Exception as exc:
+            st.warning(f"Não foi possível carregar as relações de gerente: {exc}")
+
+    df_manager_current = st.session_state.get("settings_manager_relations_df")
+    if df_manager_current is not None:
+        edited_manager = st.data_editor(
+            df_manager_current,
+            use_container_width=True,
+            height=360,
+            num_rows="dynamic",
+            disabled=["updated_at"],
+            column_config={
+                "filial": st.column_config.TextColumn("Filial"),
+                "gerente": st.column_config.TextColumn("Gerente", required=True),
+                "cod_vendedor": st.column_config.TextColumn("Cod Vendedor", required=True),
+                "cod_x": st.column_config.TextColumn("Cod X"),
+                "vendedor": st.column_config.TextColumn("Vendedor"),
+                "data_nascimento": st.column_config.TextColumn("Data de Nascimento"),
+                "cpf": st.column_config.TextColumn("CPF"),
+                "email": st.column_config.TextColumn("E-mail"),
+                "contato": st.column_config.TextColumn("Contato"),
+                "percentual_comissao_gerente": st.column_config.NumberColumn("% ComissÃ£o Gerente", format="%.4f"),
+                "ativo": st.column_config.CheckboxColumn("Ativo", default=True),
+                "updated_at": st.column_config.DatetimeColumn("Atualizado em"),
+            },
+            key="settings_manager_relations_editor",
+        )
+        if st.button("Salvar alterações de CEN x Gerente", type="primary", use_container_width=True):
+            try:
+                count = replace_active_manager_relations(edited_manager)
+                st.session_state.settings_manager_relations_df = prepare_manager_relation_editor_df(
+                    read_manager_relations()
+                )
+                st.success(f"{count} relações de gerente salvas como nova versão ativa.")
+            except Exception as exc:
+                st.error(f"Não foi possível salvar alterações de CEN x Gerente: {exc}")
 
 
 def main() -> None:
     load_dotenv()
-    st.set_page_config(page_title="Validador de Comissões", page_icon="✅", layout="wide")
+    st.set_page_config(page_title="Apuração de Comissões", page_icon="✅", layout="wide")
 
     if "conn_ok" not in st.session_state:
         st.session_state.conn_ok = False
@@ -1627,6 +2256,8 @@ def main() -> None:
         st.session_state.results_df = None
     if "machine_df" not in st.session_state:
         st.session_state.machine_df = None
+    if "machine_raw_df" not in st.session_state:
+        st.session_state.machine_raw_df = None
     if "machine_full_history_df" not in st.session_state:
         st.session_state.machine_full_history_df = None
     if "machine_receivable_validation_df" not in st.session_state:
@@ -1639,14 +2270,34 @@ def main() -> None:
         st.session_state.machine_pay_review_df = None
     if "machine_exclude_review_df" not in st.session_state:
         st.session_state.machine_exclude_review_df = None
+    if "machine_selection_state" not in st.session_state:
+        st.session_state.machine_selection_state = {}
     if "machine_rate_fat_df" not in st.session_state:
         st.session_state.machine_rate_fat_df = None
     if "machine_rate_margin_df" not in st.session_state:
         st.session_state.machine_rate_margin_df = None
+    if "manager_relations_df" not in st.session_state:
+        st.session_state.manager_relations_df = None
+    if "machine_default_one_percent_enabled" not in st.session_state:
+        st.session_state.machine_default_one_percent_enabled = True
+    if "machine_default_one_percent_last" not in st.session_state:
+        st.session_state.machine_default_one_percent_last = None
     if "settings_fat_rates_df" not in st.session_state:
         st.session_state.settings_fat_rates_df = None
     if "settings_margin_rates_df" not in st.session_state:
         st.session_state.settings_margin_rates_df = None
+    if "settings_manager_relations_df" not in st.session_state:
+        st.session_state.settings_manager_relations_df = None
+    if "cen_report_df" not in st.session_state:
+        st.session_state.cen_report_df = None
+    if "cen_pending_report_df" not in st.session_state:
+        st.session_state.cen_pending_report_df = None
+    if "manager_report_df" not in st.session_state:
+        st.session_state.manager_report_df = None
+    if "coordinator_report_df" not in st.session_state:
+        st.session_state.coordinator_report_df = None
+    if "cen_report_period" not in st.session_state:
+        st.session_state.cen_report_period = None
     if "incentive_titles_df" not in st.session_state:
         st.session_state.incentive_titles_df = None
     if "machine_source_audit_df" not in st.session_state:

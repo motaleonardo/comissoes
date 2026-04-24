@@ -6,9 +6,12 @@ import pandas as pd
 
 from commission_tool.data.sources.postgres import (
     EXCLUDED_COMMISSIONS_TABLE,
+    MANAGER_RELATION_TABLE,
     _prepare_model_fat_rates,
+    _prepare_manager_relations,
     _prepare_model_margin_rates,
     _prepare_paid_commissions_df,
+    replace_active_manager_relations,
     replace_active_model_fat_rates,
     replace_active_model_margin_rates,
     save_excluded_commissions,
@@ -69,6 +72,33 @@ class PaidCommissionMappingTests(unittest.TestCase):
         self.assertEqual(prepared.loc[0, "nro_chassi"], "CH1")
         self.assertEqual(prepared.loc[0, "valor_comissao_total"], 123.45)
 
+    def test_prepare_paid_commissions_maps_manager_fields(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "Cod Vendedor": "A0000E",
+                    "Gerente": "Hernane Borges da Costa",
+                    "% Comissão Gerente": 33.0,
+                    "Valor Comissão Gerente": 33.0,
+                }
+            ]
+        )
+
+        prepared = _prepare_paid_commissions_df(
+            df,
+            competence_year=2026,
+            competence_month=4,
+            period_label="Abril/2026",
+            period_start=date(2026, 3, 16),
+            period_end=date(2026, 4, 15),
+            source="streamlit",
+        )
+
+        self.assertEqual(prepared.loc[0, "cod_vendedor"], "A0000E")
+        self.assertEqual(prepared.loc[0, "gerente"], "Hernane Borges da Costa")
+        self.assertEqual(prepared.loc[0, "perc_comissao_gerente"], 33.0)
+        self.assertEqual(prepared.loc[0, "valor_comissao_gerente"], 33.0)
+
     def test_prepare_paid_commissions_parses_brazilian_money_and_excel_percentages(self):
         df = pd.DataFrame(
             [
@@ -102,12 +132,33 @@ class PaidCommissionMappingTests(unittest.TestCase):
             pd.DataFrame([{"Modelo": "S550", "Percentual": 0.45}])
         )
         margin_prepared = _prepare_model_margin_rates(
-            pd.DataFrame([{"Modelo": "S550", "Percentual": 0.2, "Meta de Margem": 0.45}])
+            pd.DataFrame([{"Modelo": "S550", "Percentual": 0.2, "Meta": 0.45}])
         )
 
         self.assertEqual(fat_prepared.loc[0, "percentual"], 0.45)
         self.assertEqual(margin_prepared.loc[0, "percentual"], 0.2)
-        self.assertEqual(margin_prepared.loc[0, "meta_margem"], 0.45)
+        self.assertEqual(margin_prepared.loc[0, "meta_margem"], 45.0)
+
+    def test_prepare_paid_commissions_uses_margin_target_parser_for_meta(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "Meta de Margem": 0.15,
+                }
+            ]
+        )
+
+        prepared = _prepare_paid_commissions_df(
+            df,
+            competence_year=2026,
+            competence_month=4,
+            period_label="Abril/2026",
+            period_start=date(2026, 3, 16),
+            period_end=date(2026, 4, 15),
+            source="upload_excel",
+        )
+
+        self.assertEqual(prepared.loc[0, "meta_margem"], 15.0)
 
     def test_model_rule_upload_normalizes_legacy_integer_percentages(self):
         fat_prepared = _prepare_model_fat_rates(
@@ -119,7 +170,27 @@ class PaidCommissionMappingTests(unittest.TestCase):
 
         self.assertEqual(fat_prepared.loc[0, "percentual"], 0.45)
         self.assertEqual(margin_prepared.loc[0, "percentual"], 0.2)
-        self.assertEqual(margin_prepared.loc[0, "meta_margem"], 0.45)
+        self.assertEqual(margin_prepared.loc[0, "meta_margem"], 45.0)
+
+    def test_prepare_manager_relations_uses_default_manager_percentage(self):
+        prepared = _prepare_manager_relations(
+            pd.DataFrame(
+                [
+                    {
+                        "Filial": "Loja Goiania",
+                        "Gerente": "Hernane Borges da Costa",
+                        "Cod Vendedor": "A0000E",
+                        "Cod X": "X934927",
+                        "Vendedor": "Marcio",
+                    }
+                ]
+            )
+        )
+
+        self.assertEqual(prepared.loc[0, "cod_vendedor"], "A0000E")
+        self.assertEqual(prepared.loc[0, "gerente"], "Hernane Borges da Costa")
+        self.assertEqual(prepared.loc[0, "percentual_comissao_gerente"], 33.0)
+        self.assertTrue(prepared.loc[0, "ativo"])
 
     def test_replace_active_fat_rates_deactivates_current_rows_and_appends_new_version(self):
         fake_conn = FakeConnection()
@@ -163,7 +234,7 @@ class PaidCommissionMappingTests(unittest.TestCase):
             patch.object(pd.DataFrame, "to_sql", fake_to_sql),
         ):
             count = replace_active_model_margin_rates(
-                pd.DataFrame([{"Modelo": "6125J", "Percentual": "1,00%", "Meta de Margem": "12,50%"}])
+                pd.DataFrame([{"Modelo": "6125J", "Percentual": "1,00%", "Meta": 0.125}])
             )
 
         self.assertEqual(count, 1)
@@ -171,7 +242,40 @@ class PaidCommissionMappingTests(unittest.TestCase):
         self.assertFalse(any("DELETE FROM comissao_margem_modelo" in sql for sql in fake_conn.executed_sql))
         self.assertEqual(captured["table_name"], "comissao_margem_modelo")
         self.assertEqual(captured["df"].loc[0, "percentual"], 1.0)
-        self.assertEqual(captured["df"].loc[0, "meta_margem"], 0.125)
+        self.assertEqual(captured["df"].loc[0, "meta_margem"], 12.5)
+        self.assertTrue(captured["df"].loc[0, "ativo"])
+
+    def test_replace_active_manager_relations_deactivates_current_rows_and_appends_new_version(self):
+        fake_conn = FakeConnection()
+        captured = {}
+
+        def fake_to_sql(self, table_name, conn, if_exists, index):
+            captured["table_name"] = table_name
+            captured["df"] = self.copy()
+
+        with (
+            patch("commission_tool.data.sources.postgres.ensure_commission_tables"),
+            patch("commission_tool.data.sources.postgres.get_engine", return_value=FakeEngine(fake_conn)),
+            patch.object(pd.DataFrame, "to_sql", fake_to_sql),
+        ):
+            count = replace_active_manager_relations(
+                pd.DataFrame(
+                    [
+                        {
+                            "Filial": "Loja Goiania",
+                            "Gerente": "Hernane Borges da Costa",
+                            "Cod Vendedor": "A0000E",
+                            "% Comissão Gerente": "33,00%",
+                        }
+                    ]
+                )
+            )
+
+        self.assertEqual(count, 1)
+        self.assertTrue(any("UPDATE comissao_gerente_vendedor" in sql for sql in fake_conn.executed_sql))
+        self.assertEqual(captured["table_name"], MANAGER_RELATION_TABLE)
+        self.assertEqual(captured["df"].loc[0, "cod_vendedor"], "A0000E")
+        self.assertEqual(captured["df"].loc[0, "percentual_comissao_gerente"], 33.0)
         self.assertTrue(captured["df"].loc[0, "ativo"])
 
     def test_save_excluded_commissions_uses_excluded_table_with_paid_schema(self):

@@ -487,11 +487,15 @@ class SQLServerDataSource:
                 CAST(COALESCE(f.[Valor Total], 0) AS float) AS receita_bruta,
                 CAST(COALESCE(f.[Valor Venda Líquida], 0) AS float) AS receita_liquida,
                 CAST(COALESCE(f.[Valor Custo], 0) AS float) AS cmv,
-                (
-                    CAST(COALESCE(f.[Valor Total], 0) AS float)
-                    - CAST(COALESCE(f.[Valor Custo], 0) AS float)
-                    - CAST(COALESCE(f.[Valor Impostos], 0) AS float)
-                ) AS margem
+                CASE
+                    WHEN CAST(COALESCE(f.[Valor Total], 0) AS float) >= 0
+                        THEN CAST(COALESCE(f.[Valor Total], 0) AS float)
+                           - CAST(COALESCE(f.[Valor Impostos], 0) AS float)
+                           - CAST(COALESCE(f.[Valor Custo], 0) AS float)
+                    ELSE (CAST(COALESCE(f.[Valor Total], 0) AS float) * -1)
+                         + CAST(COALESCE(f.[Valor Impostos], 0) AS float)
+                         + CAST(COALESCE(f.[Valor Custo], 0) AS float)
+                END AS margem
             FROM bdnFaturamentoMaquinas f
             WHERE TRY_CONVERT(date, f.[Data de Emissão], 103) BETWEEN ? AND ?
               AND (
@@ -515,11 +519,15 @@ class SQLServerDataSource:
                     - CAST(COALESCE(d.[Valor Impostos], 0) AS float)
                 ) AS receita_liquida,
                 CAST(COALESCE(d.[Valor Custo], 0) AS float) AS cmv,
-                (
-                    CAST(COALESCE(d.[Valor Total], 0) AS float) * -1
-                    - CAST(COALESCE(d.[Valor Custo], 0) AS float)
-                    - CAST(COALESCE(d.[Valor Impostos], 0) AS float)
-                ) AS margem
+                CASE
+                    WHEN CAST(COALESCE(d.[Valor Total], 0) AS float) >= 0
+                        THEN CAST(COALESCE(d.[Valor Total], 0) AS float)
+                           - CAST(COALESCE(d.[Valor Impostos], 0) AS float)
+                           - CAST(COALESCE(d.[Valor Custo], 0) AS float)
+                    ELSE (CAST(COALESCE(d.[Valor Total], 0) AS float) * -1)
+                         + CAST(COALESCE(d.[Valor Impostos], 0) AS float)
+                         + CAST(COALESCE(d.[Valor Custo], 0) AS float)
+                END AS margem
             FROM bdnDevolucaoMaquinas d
             WHERE TRY_CONVERT(date, d.[Data de Emissão], 103) BETWEEN ? AND ?
               AND (
@@ -536,8 +544,10 @@ class SQLServerDataSource:
             veic.veiculo_categoria AS [Veículo Categoria],
             veic.veiculo_estado AS [Veículo Estado],
             base.chassi AS [Nro Chassi],
+            base.cliente_codigo AS [Cliente Código],
             cli.cliente_nome AS [Nome do Cliente],
             vend.vendedor_nome AS [CEN],
+            base.vendedor_codigo AS [Cod Vendedor],
             CASE
                 WHEN UPPER(LTRIM(RTRIM(COALESCE(veic.veiculo_categoria, '')))) = 'IP'
                     THEN 'Implemento'
