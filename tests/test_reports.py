@@ -4,7 +4,9 @@ import pandas as pd
 
 from commission_tool.core.reports import (
     build_cen_report,
+    build_filial_analytic_reports,
     build_manager_report,
+    build_used_implements_analytic_report,
     build_used_implements_coordinator_report,
 )
 
@@ -354,6 +356,126 @@ class ReportsTests(unittest.TestCase):
         self.assertEqual(usados_row["% MB Realizado"], 12.0)
         self.assertEqual(usados_row["Valor Comissão Margem"], 160.0)
         self.assertEqual(usados_row["Valor Total da Comissão"], 320.0)
+
+    def test_build_filial_analytic_reports_groups_only_nonzero_commission_filiais(self):
+        paid_commissions = pd.DataFrame(
+            [
+                {
+                    "mes_ano_comissao": "Abril/2026",
+                    "filial": "Loja A",
+                    "nro_documento": "1",
+                    "nro_chassi": "CH1",
+                    "nome_cliente": "Cliente 1",
+                    "cen": "CEN 1",
+                    "classificacao_venda": "Maquinas JD - Novos",
+                    "receita_bruta": 1000.0,
+                    "valor_comissao_fat": 100.0,
+                    "margem_rs": 200.0,
+                    "perc_margem_direta": 20.0,
+                    "valor_incentivo": 10.0,
+                    "margem_incentivos_rs": 210.0,
+                    "meta_margem": 15.0,
+                    "perc_margem_bruta": 21.0,
+                    "valor_comissao_margem": 20.0,
+                    "valor_comissao_total": 120.0,
+                },
+                {
+                    "mes_ano_comissao": "Abril/2026",
+                    "filial": "Loja B",
+                    "nro_documento": "2",
+                    "nro_chassi": "CH2",
+                    "nome_cliente": "Cliente 2",
+                    "cen": "CEN 2",
+                    "classificacao_venda": "Implemento",
+                    "receita_bruta": 500.0,
+                    "valor_comissao_fat": 0.0,
+                    "margem_rs": 50.0,
+                    "perc_margem_direta": 10.0,
+                    "valor_incentivo": 0.0,
+                    "margem_incentivos_rs": 50.0,
+                    "meta_margem": 0.0,
+                    "perc_margem_bruta": 10.0,
+                    "valor_comissao_margem": 0.0,
+                    "valor_comissao_total": 0.0,
+                },
+            ]
+        )
+
+        reports = build_filial_analytic_reports(paid_commissions, "Abril/2026")
+
+        self.assertEqual(len(reports), 1)
+        filial, filial_df = reports[0]
+        self.assertEqual(filial, "Loja A")
+        self.assertEqual(filial_df.loc[0, "Filial"], "Loja A")
+        self.assertEqual(filial_df.loc[0, "Valor Comissão Total"], 120.0)
+
+    def test_build_used_implements_analytic_report_filters_only_requested_types(self):
+        paid_commissions = pd.DataFrame(
+            [
+                {
+                    "mes_ano_comissao": "Abril/2026",
+                    "filial": "Loja A",
+                    "nro_documento": "1",
+                    "nro_chassi": "CH1",
+                    "nome_cliente": "Cliente 1",
+                    "cen": "CEN 1",
+                    "classificacao_venda": "Implemento",
+                    "receita_bruta": 1000.0,
+                    "valor_comissao_fat": 100.0,
+                    "margem_rs": 200.0,
+                    "perc_margem_direta": 20.0,
+                    "valor_incentivo": 10.0,
+                    "margem_incentivos_rs": 210.0,
+                    "meta_margem": 15.0,
+                    "perc_margem_bruta": 21.0,
+                    "valor_comissao_margem": 20.0,
+                    "valor_comissao_total": 120.0,
+                },
+                {
+                    "mes_ano_comissao": "Abril/2026",
+                    "filial": "Loja A",
+                    "nro_documento": "2",
+                    "nro_chassi": "CH2",
+                    "nome_cliente": "Cliente 2",
+                    "cen": "CEN 2",
+                    "classificacao_venda": "Maquinas JD - Usados",
+                    "receita_bruta": 800.0,
+                    "valor_comissao_fat": 80.0,
+                    "margem_rs": 100.0,
+                    "perc_margem_direta": 12.5,
+                    "valor_incentivo": 0.0,
+                    "margem_incentivos_rs": 100.0,
+                    "meta_margem": 15.0,
+                    "perc_margem_bruta": 12.5,
+                    "valor_comissao_margem": 0.0,
+                    "valor_comissao_total": 80.0,
+                },
+                {
+                    "mes_ano_comissao": "Abril/2026",
+                    "filial": "Loja A",
+                    "nro_documento": "3",
+                    "nro_chassi": "CH3",
+                    "nome_cliente": "Cliente 3",
+                    "cen": "CEN 3",
+                    "classificacao_venda": "Maquinas JD - Novos",
+                    "receita_bruta": 5000.0,
+                    "valor_comissao_fat": 500.0,
+                    "margem_rs": 1000.0,
+                    "perc_margem_direta": 20.0,
+                    "valor_incentivo": 0.0,
+                    "margem_incentivos_rs": 1000.0,
+                    "meta_margem": 15.0,
+                    "perc_margem_bruta": 20.0,
+                    "valor_comissao_margem": 50.0,
+                    "valor_comissao_total": 550.0,
+                },
+            ]
+        )
+
+        report_df = build_used_implements_analytic_report(paid_commissions, "Abril/2026")
+
+        self.assertEqual(report_df["Classificação Venda"].tolist(), ["Implemento", "Maquinas JD - Usados"])
+        self.assertEqual(report_df["Nro Documento"].tolist(), ["1", "2"])
 
 
 if __name__ == "__main__":

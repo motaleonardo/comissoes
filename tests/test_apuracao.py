@@ -107,14 +107,33 @@ class ApuracaoTests(unittest.TestCase):
 
         result = apply_commission_rules(df_machine, fat_rates, margin_rates)
 
-        self.assertEqual(result.loc[0, "% Comissão Fat."], 1.0)
-        self.assertEqual(result.loc[0, "Valor Comissão Total"], 2500.0)
-        self.assertEqual(result.loc[1, "% Comissão Fat."], 0.84)
-        self.assertEqual(result.loc[1, "Valor Comissão Total"], 1260.0)
+        self.assertEqual(result.loc[0, "% Comissão Fat."], 0.84)
+        self.assertEqual(result.loc[0, "Valor Comissão Total"], 2100.0)
+        self.assertEqual(result.loc[1, "% Comissão Fat."], 1.0)
+        self.assertEqual(result.loc[1, "Valor Comissão Total"], 1500.0)
         self.assertEqual(result.loc[2, "% Comissão Fat."], 1.0)
         self.assertEqual(result.loc[2, "Valor Comissão Total"], 800.0)
         self.assertEqual(result["% Comissão Margem"].tolist(), [0.0, 0.0, 0.0])
         self.assertEqual(result["Gatilho Comissão Margem Atingido"].tolist(), [False, False, False])
+
+    def test_implemento_threshold_equal_to_200k_uses_lower_rate(self):
+        df_machine = pd.DataFrame(
+            [
+                {
+                    "Classificacao Venda": "Implemento",
+                    "Modelo": "IMP-C",
+                    "Receita Bruta": 200000.0,
+                    "% Margem Bruta": 40.0,
+                },
+            ]
+        ).rename(columns={"Classificacao Venda": "Classificação Venda"})
+        fat_rates = pd.DataFrame([{"modelo": "IMP-C", "percentual": 9.0}])
+        margin_rates = pd.DataFrame([{"modelo": "IMP-C", "percentual": 2.0, "meta_margem": 10.0}])
+
+        result = apply_commission_rules(df_machine, fat_rates, margin_rates)
+
+        self.assertEqual(result.loc[0, "% Comissão Fat."], 0.84)
+        self.assertEqual(result.loc[0, "Valor Comissão Total"], 1680.0)
 
     def test_normalizes_commission_percentages_that_were_imported_times_one_hundred(self):
         df_machine = pd.DataFrame(

@@ -8,6 +8,26 @@ from typing import Any
 import pandas as pd
 
 
+ANALYTIC_REPORT_COLUMN_MAP = [
+    ("filial", "Filial"),
+    ("nro_documento", "Nro Documento"),
+    ("nro_chassi", "Nro Chassi"),
+    ("nome_cliente", "Nome do Cliente"),
+    ("cen", "CEN"),
+    ("classificacao_venda", "Classificação Venda"),
+    ("receita_bruta", "Receita Bruta"),
+    ("valor_comissao_fat", "Valor Comissão Fat."),
+    ("margem_rs", "Margem R$"),
+    ("perc_margem_direta", "% Margem Direta"),
+    ("valor_incentivo", "Valor Incentivo"),
+    ("margem_incentivos_rs", "Margem + Incentivos R$"),
+    ("meta_margem", "Meta de Margem"),
+    ("perc_margem_bruta", "% Margem Bruta"),
+    ("valor_comissao_margem", "Valor Comissão Margem"),
+    ("valor_comissao_total", "Valor Comissão Total"),
+]
+
+
 def _normalize_text(value: Any) -> str:
     if pd.isna(value):
         return ""
@@ -56,14 +76,20 @@ def _prepare_paid_commissions_for_period(
     paid["__cod_vendedor"] = paid.get("cod_vendedor", pd.Series(dtype=object)).apply(_normalize_code)
     paid["__classificacao"] = paid.get("classificacao_venda", pd.Series(dtype=object)).apply(_normalize_text)
     paid["__cen"] = paid.get("cen", pd.Series(dtype=object)).apply(_normalize_text)
-    for column in [
-        "valor_comissao_fat",
-        "valor_comissao_margem",
+    paid["__filial"] = paid.get("filial", pd.Series(dtype=object)).fillna("").astype(str).str.strip()
+    numeric_columns = [
         "receita_bruta",
+        "valor_comissao_fat",
+        "margem_rs",
+        "perc_margem_direta",
+        "valor_incentivo",
         "margem_incentivos_rs",
-        "receita_bruta_incentivos_rs",
+        "meta_margem",
         "perc_margem_bruta",
-    ]:
+        "valor_comissao_margem",
+        "receita_bruta_incentivos_rs",
+    ]
+    for column in numeric_columns:
         paid[column] = pd.to_numeric(
             paid[column] if column in paid.columns else pd.Series(index=paid.index, dtype=float),
             errors="coerce",
@@ -104,6 +130,26 @@ def _aggregate_cen_commission_columns(frame: pd.DataFrame) -> pd.Series:
             "Comissão Margem": frame["valor_comissao_margem"].sum(),
         }
     )
+
+
+def _build_analytic_report_df(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=[label for _, label in ANALYTIC_REPORT_COLUMN_MAP])
+
+    analytic = frame.copy()
+    analytic = analytic.rename(columns={source: target for source, target in ANALYTIC_REPORT_COLUMN_MAP})
+    ordered_columns = [label for _, label in ANALYTIC_REPORT_COLUMN_MAP]
+    for column in ordered_columns:
+        if column not in analytic.columns:
+            analytic[column] = None
+    return analytic[ordered_columns].reset_index(drop=True)
+
+
+def _sort_by_available(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    available = [column for column in columns if column in frame.columns]
+    if not available:
+        return frame
+    return frame.sort_values(available, na_position="last")
 
 
 def build_cen_report(
@@ -327,3 +373,45 @@ def build_used_implements_coordinator_report(
         )
 
     return pd.DataFrame(rows, columns=report_columns)
+
+
+def build_filial_analytic_reports(
+    paid_commissions: pd.DataFrame | None,
+    period_label: str,
+) -> list[tuple[str, pd.DataFrame]]:
+    paid = _prepare_paid_commissions_for_period(paid_commissions, period_label)
+    if paid.empty:
+        return []
+
+    paid = paid.loc[paid["valor_comissao_total"].ne(0)].copy()
+    if paid.empty:
+        return []
+
+    reports: list[tuple[str, pd.DataFrame]] = []
+    filiais = sorted([filial for filial in paid["__filial"].dropna().unique().tolist() if str(filial).strip()])
+    for filial in filiais:
+        filial_df = paid.loc[paid["__filial"].eq(filial)].copy()
+        if filial_df.empty:
+            continue
+        filial_df = _sort_by_available(filial_df, ["data_emissao", "nro_documento", "nro_chassi"])
+        reports.append((str(filial).strip(), _build_analytic_report_df(filial_df)))
+    return reports
+
+
+def build_used_implements_analytic_report(
+    paid_commissions: pd.DataFrame | None,
+    period_label: str,
+) -> pd.DataFrame:
+    paid = _prepare_paid_commissions_for_period(paid_commissions, period_label)
+    if paid.empty:
+        return _build_analytic_report_df(pd.DataFrame())
+
+    filtered = paid.loc[paid["__classificacao"].isin(["IMPLEMENTO", "MAQUINAS JD - USADOS"])].copy()
+    if filtered.empty:
+        return _build_analytic_report_df(pd.DataFrame())
+
+    filtered = _sort_by_available(
+        filtered,
+        ["classificacao_venda", "filial", "data_emissao", "nro_documento", "nro_chassi"],
+    )
+    return _build_analytic_report_df(filtered)

@@ -15,8 +15,8 @@ from commission_tool.core.formatting import (
 
 
 IMPLEMENTO_THRESHOLD = 200000.0
-IMPLEMENTO_RATE_ABOVE_THRESHOLD = 1.0
-IMPLEMENTO_RATE_UP_TO_THRESHOLD = 0.84
+IMPLEMENTO_RATE_AT_OR_ABOVE_THRESHOLD = 0.84
+IMPLEMENTO_RATE_BELOW_THRESHOLD = 1.0
 USED_MACHINE_RATE = 1.0
 
 
@@ -157,11 +157,11 @@ def apply_commission_rules(
     used_machine_mask = normalized_classification.eq("MAQUINAS JD - USADOS")
     classification_override_mask = implemento_mask | used_machine_mask
 
-    result.loc[implemento_mask & receita_bruta.gt(IMPLEMENTO_THRESHOLD), "% Comissão Fat."] = (
-        IMPLEMENTO_RATE_ABOVE_THRESHOLD
+    result.loc[implemento_mask & receita_bruta.ge(IMPLEMENTO_THRESHOLD), "% Comissão Fat."] = (
+        IMPLEMENTO_RATE_AT_OR_ABOVE_THRESHOLD
     )
-    result.loc[implemento_mask & ~receita_bruta.gt(IMPLEMENTO_THRESHOLD), "% Comissão Fat."] = (
-        IMPLEMENTO_RATE_UP_TO_THRESHOLD
+    result.loc[implemento_mask & ~receita_bruta.ge(IMPLEMENTO_THRESHOLD), "% Comissão Fat."] = (
+        IMPLEMENTO_RATE_BELOW_THRESHOLD
     )
     result.loc[used_machine_mask, "% Comissão Fat."] = USED_MACHINE_RATE
     result.loc[classification_override_mask, ["% Comissão Margem", "Meta de Margem"]] = 0.0

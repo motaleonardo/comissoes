@@ -28,7 +28,9 @@ from commission_tool.core.paid_audit import (
 from commission_tool.core.periods import MONTH_NAMES_PT, build_period_options, default_base_period
 from commission_tool.core.reports import (
     build_cen_report,
+    build_filial_analytic_reports,
     build_manager_report,
+    build_used_implements_analytic_report,
     build_used_implements_coordinator_report,
 )
 from commission_tool.data.pipeline import (
@@ -61,6 +63,7 @@ from commission_tool.data.sources.postgres import (
 )
 from commission_tool.data.sources.sqlserver import get_connection
 from commission_tool.io.excel import dataframe_to_excel_download, load_commission_spreadsheet
+from commission_tool.io.pdf import build_reports_pdf
 
 
 CURRENCY_COLUMNS = [
@@ -1804,7 +1807,7 @@ def render_reports_view() -> None:
         try:
             paid_commissions = read_paid_commissions_by_period_label(selected_period)
             manager_relations = read_manager_relations()
-            cen_report_df, pending_report_df = build_cen_report(
+            cen_report_df, _ = build_cen_report(
                 paid_commissions,
                 manager_relations,
                 selected_period,
@@ -1818,52 +1821,100 @@ def render_reports_view() -> None:
                 paid_commissions,
                 selected_period,
             )
+            filial_analytic_reports = build_filial_analytic_reports(
+                paid_commissions,
+                selected_period,
+            )
+            used_implements_analytic_df = build_used_implements_analytic_report(
+                paid_commissions,
+                selected_period,
+            )
             st.session_state.cen_report_df = cen_report_df
-            st.session_state.cen_pending_report_df = pending_report_df
             st.session_state.manager_report_df = manager_report_df
             st.session_state.coordinator_report_df = coordinator_report_df
+            st.session_state.filial_analytic_reports = filial_analytic_reports
+            st.session_state.used_implements_analytic_df = used_implements_analytic_df
             st.session_state.cen_report_period = selected_period
             st.success(
                 f"Relatórios gerados para {selected_period}: "
                 f"{len(cen_report_df)} vendedores, {len(manager_report_df)} gerentes, "
-                f"{len(coordinator_report_df)} linhas de coordenador "
-                f"e {len(pending_report_df)} pendência(s)."
+                f"{len(coordinator_report_df)} linhas de coordenador e "
+                f"{len(filial_analytic_reports)} filial(is) analítica(s)."
             )
         except Exception as exc:
             st.error(f"Não foi possível gerar os relatórios: {exc}")
             return
 
     cen_report_df = st.session_state.get("cen_report_df")
-    pending_report_df = st.session_state.get("cen_pending_report_df")
     manager_report_df = st.session_state.get("manager_report_df")
     coordinator_report_df = st.session_state.get("coordinator_report_df")
+    filial_analytic_reports = st.session_state.get("filial_analytic_reports", [])
+    used_implements_analytic_df = st.session_state.get("used_implements_analytic_df")
     report_period = st.session_state.get("cen_report_period", selected_period)
 
-    if cen_report_df is None or manager_report_df is None or coordinator_report_df is None:
+    if (
+        cen_report_df is None
+        or manager_report_df is None
+        or coordinator_report_df is None
+        or used_implements_analytic_df is None
+    ):
         st.info("Selecione a competência e clique em Gerar relatórios.")
         return
 
     st.markdown("### Relatório do CEN")
     total_cens = len(cen_report_df)
     total_report = pd.to_numeric(cen_report_df.get("Valor Comissão Total"), errors="coerce").fillna(0).sum()
-    total_pending = 0.0 if pending_report_df is None else pd.to_numeric(
-        pending_report_df.get("Valor Comissão Total"),
-        errors="coerce",
-    ).fillna(0).sum()
 
-    metric_1, metric_2, metric_3 = st.columns(3)
+    metric_1, metric_2 = st.columns(2)
     metric_1.metric("CENs no relatório", total_cens)
     metric_2.metric("Valor Comissão Total", format_currency_br(total_report))
-    metric_3.metric("Pendências", format_currency_br(total_pending))
+
+    pdf_sections: list[tuple[str, object]] = [
+        (f"Relatório do CEN - {report_period}", format_machine_display_df(cen_report_df)),
+        (f"Relatório dos Gerentes - {report_period}", format_machine_display_df(manager_report_df)),
+        (
+            f"Coordenador de Seminovos e Implementos - {report_period}",
+            format_machine_display_df(coordinator_report_df),
+        ),
+    ]
+    for filial, filial_df in filial_analytic_reports:
+        pdf_sections.append((f"Analítico por Filial - {filial}", format_machine_display_df(filial_df)))
+    pdf_sections.append(
+        (
+            f"Analítico Implementos e Usados - {report_period}",
+            format_machine_display_df(used_implements_analytic_df),
+        )
+    )
+    reports_pdf = None
+    reports_pdf_error = None
+    try:
+        reports_pdf = build_reports_pdf(f"Relatórios de Comissões - {report_period}", pdf_sections)
+    except Exception as exc:
+        reports_pdf_error = exc
+
+    st.markdown("### Exportações")
+    export_col_1, export_col_2 = st.columns(2)
+    with export_col_1:
+        if reports_pdf is not None:
+            st.download_button(
+                "Baixar relatório completo em PDF",
+                data=reports_pdf,
+                file_name=f"relatorios_comissoes_{sanitize_download_label(report_period)}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+        else:
+            st.error(f"Não foi possível gerar o PDF: {reports_pdf_error}")
 
     report_buffer = dataframe_to_excel_download(cen_report_df, sheet_name="Relatorio CEN")
-    st.download_button(
-        "Exportar relatório CEN em .xlsx",
-        data=report_buffer,
-        file_name=f"relatorio_cen_{sanitize_download_label(report_period)}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=False,
-    )
+    with export_col_2:
+        st.download_button(
+            "Baixar relatório CEN em .xlsx",
+            data=report_buffer,
+            file_name=f"relatorio_cen_{sanitize_download_label(report_period)}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
     st.dataframe(
         format_machine_display_df(cen_report_df),
         use_container_width=True,
@@ -1902,6 +1953,20 @@ def render_reports_view() -> None:
         hide_index=True,
     )
 
+    st.markdown("### Analítico por Filial")
+    if not filial_analytic_reports:
+        st.info("Nenhuma filial com comissão encontrada para esta competência.")
+    else:
+        st.caption(f"{len(filial_analytic_reports)} filial(is) com valor de comissão na competência selecionada.")
+        for filial, filial_df in filial_analytic_reports:
+            st.markdown(f"#### {filial}")
+            st.dataframe(
+                format_machine_display_df(filial_df),
+                use_container_width=True,
+                height=280,
+                hide_index=True,
+            )
+
     st.markdown("### Coordenador de Seminovos e Implementos")
     total_coordinator_revenue = pd.to_numeric(
         coordinator_report_df.get("Receita Bruta"),
@@ -1935,23 +2000,11 @@ def render_reports_view() -> None:
         hide_index=True,
     )
 
-    st.markdown("### Pendências de relatório")
-    if pending_report_df is None or pending_report_df.empty:
-        st.success("Nenhuma pendência encontrada para esta competência.")
-        return
-
-    pending_buffer = dataframe_to_excel_download(pending_report_df, sheet_name="Pendencias Relatorio")
-    st.download_button(
-        "Exportar pendências em .xlsx",
-        data=pending_buffer,
-        file_name=f"pendencias_relatorio_cen_{sanitize_download_label(report_period)}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=False,
-    )
+    st.markdown("### Analítico de Implementos e Usados")
     st.dataframe(
-        format_machine_display_df(pending_report_df),
+        format_machine_display_df(used_implements_analytic_df),
         use_container_width=True,
-        height=320,
+        height=360,
         hide_index=True,
     )
 
@@ -2296,6 +2349,10 @@ def main() -> None:
         st.session_state.manager_report_df = None
     if "coordinator_report_df" not in st.session_state:
         st.session_state.coordinator_report_df = None
+    if "filial_analytic_reports" not in st.session_state:
+        st.session_state.filial_analytic_reports = []
+    if "used_implements_analytic_df" not in st.session_state:
+        st.session_state.used_implements_analytic_df = None
     if "cen_report_period" not in st.session_state:
         st.session_state.cen_report_period = None
     if "incentive_titles_df" not in st.session_state:
