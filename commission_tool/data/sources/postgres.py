@@ -599,6 +599,30 @@ def read_paid_commission_chassis_summary() -> pd.DataFrame:
     return pd.read_sql(query, engine)
 
 
+def read_paid_commission_document_summary() -> pd.DataFrame:
+    """Read all paid commission history aggregated by chassis and document."""
+    from sqlalchemy import text
+
+    ensure_commission_tables()
+    engine = get_engine()
+    query = text(
+        f"""
+        SELECT
+            UPPER(TRIM(nro_chassi)) AS nro_chassi,
+            TRIM(nro_documento) AS nro_documento,
+            COUNT(*) AS qtd_lancamentos_documento_pago,
+            COALESCE(SUM(valor_comissao_total), 0) AS valor_comissao_total_documento
+        FROM {PAID_COMMISSIONS_TABLE}
+        WHERE nro_chassi IS NOT NULL
+          AND TRIM(nro_chassi) <> ''
+          AND nro_documento IS NOT NULL
+          AND TRIM(nro_documento) <> ''
+        GROUP BY UPPER(TRIM(nro_chassi)), TRIM(nro_documento)
+        """
+    )
+    return pd.read_sql(query, engine)
+
+
 def read_excluded_commission_chassis_summary() -> pd.DataFrame:
     """Read all manually excluded commission history aggregated by chassis."""
     from sqlalchemy import text

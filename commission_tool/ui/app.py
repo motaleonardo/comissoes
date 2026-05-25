@@ -48,6 +48,7 @@ from commission_tool.data.sources.postgres import (
     read_excluded_commission_chassis_summary,
     read_model_fat_rates,
     read_model_margin_rates,
+    read_paid_commission_document_summary,
     read_paid_commission_period_labels,
     read_paid_commissions_by_period_label,
     read_paid_commission_chassis_summary,
@@ -239,18 +240,21 @@ def refresh_machine_apuracao_state() -> None:
         df_manager_relations = read_manager_relations()
 
     df_paid_summary = read_paid_commission_chassis_summary()
+    df_paid_document_summary = read_paid_commission_document_summary()
     df_excluded_summary = read_excluded_commission_chassis_summary()
     df_machine, df_machine_history = prepare_machine_apuracao(
         df_machine_raw,
         df_fat_rates,
         df_margin_rates,
         df_paid_summary,
+        df_paid_document_summary,
         df_manager_relations,
         df_excluded_summary,
     )
     st.session_state.machine_df = df_machine
     st.session_state.machine_full_history_df = df_machine_history
     st.session_state.machine_paid_summary_df = df_paid_summary
+    st.session_state.machine_paid_document_summary_df = df_paid_document_summary
     st.session_state.machine_excluded_summary_df = df_excluded_summary
     st.session_state.manager_relations_df = df_manager_relations
     st.session_state.machine_receivable_validation_df = None
@@ -1161,12 +1165,14 @@ def render_machine_extraction() -> None:
                 df_margin_rates = read_model_margin_rates()
                 df_manager_relations = read_manager_relations()
                 df_paid_summary = read_paid_commission_chassis_summary()
+                df_paid_document_summary = read_paid_commission_document_summary()
                 df_excluded_summary = read_excluded_commission_chassis_summary()
                 df_machine, df_machine_history = prepare_machine_apuracao(
                     df_machine_raw,
                     df_fat_rates,
                     df_margin_rates,
                     df_paid_summary,
+                    df_paid_document_summary,
                     df_manager_relations,
                     df_excluded_summary,
                 )
@@ -1177,6 +1183,7 @@ def render_machine_extraction() -> None:
             st.session_state.machine_rate_margin_df = df_margin_rates
             st.session_state.manager_relations_df = df_manager_relations
             st.session_state.machine_paid_summary_df = df_paid_summary
+            st.session_state.machine_paid_document_summary_df = df_paid_document_summary
             st.session_state.machine_excluded_summary_df = df_excluded_summary
             st.session_state.incentive_titles_df = df_incentives
             st.session_state.machine_source_audit_df = df_source_audit

@@ -330,15 +330,72 @@ class ApuracaoTests(unittest.TestCase):
                 },
             ]
         )
+        paid_document_summary = pd.DataFrame(
+            [
+                {
+                    "nro_chassi": "CH_POS",
+                    "nro_documento": "1",
+                    "qtd_lancamentos_documento_pago": 1,
+                    "valor_comissao_total_documento": 100.0,
+                }
+            ]
+        )
 
-        candidates, full_history = apply_paid_history_filter(df_machine, paid_summary)
+        candidates, full_history = apply_paid_history_filter(
+            df_machine,
+            paid_summary,
+            paid_document_summary=paid_document_summary,
+        )
 
         self.assertEqual(candidates["Nro Chassi"].tolist(), ["CH_NEG", "CH_BOTH", "CH_NONE"])
         self.assertTrue(full_history.loc[0, "Bloqueado por Pagamento Histórico"])
-        self.assertIn("Já pago", full_history.loc[0, "Status Confronto Pagas"])
+        self.assertIn("documento", full_history.loc[0, "Status Confronto Pagas"].lower())
         self.assertIn("estorno", full_history.loc[1, "Status Confronto Pagas"].lower())
         self.assertIn("estorno", full_history.loc[2, "Status Confronto Pagas"].lower())
         self.assertEqual(full_history.loc[3, "Status Confronto Pagas"], "Novo para apuração")
+
+    def test_keeps_new_document_for_same_chassi_as_candidate_and_blocks_only_exact_pair(self):
+        df_machine = pd.DataFrame(
+            [
+                {"Nro Chassi": "CH_REPEAT", "Nro Documento": "000123"},
+                {"Nro Chassi": "CH_REPEAT", "Nro Documento": "000124"},
+            ]
+        )
+        paid_summary = pd.DataFrame(
+            [
+                {
+                    "nro_chassi": "CH_REPEAT",
+                    "qtd_lancamentos_pagos": 1,
+                    "valor_pago_positivo": 500.0,
+                    "valor_estornado_negativo": 0.0,
+                    "saldo_comissao_paga_chassi": 500.0,
+                    "tem_pagamento_positivo": True,
+                    "tem_estorno_negativo": False,
+                }
+            ]
+        )
+        paid_document_summary = pd.DataFrame(
+            [
+                {
+                    "nro_chassi": "CH_REPEAT",
+                    "nro_documento": "123",
+                    "qtd_lancamentos_documento_pago": 1,
+                    "valor_comissao_total_documento": 500.0,
+                }
+            ]
+        )
+
+        candidates, full_history = apply_paid_history_filter(
+            df_machine,
+            paid_summary,
+            paid_document_summary=paid_document_summary,
+        )
+
+        self.assertEqual(candidates["Nro Documento"].tolist(), ["000124"])
+        self.assertTrue(full_history.loc[0, "Bloqueado por Pagamento Histórico"])
+        self.assertFalse(full_history.loc[1, "Bloqueado por Pagamento Histórico"])
+        self.assertIn("documento", full_history.loc[0, "Status Confronto Pagas"].lower())
+        self.assertIn("outro documento", full_history.loc[1, "Status Confronto Pagas"].lower())
 
     def test_filters_excluded_chassis_even_without_paid_history(self):
         df_machine = pd.DataFrame(

@@ -32,6 +32,26 @@ def normalize_chassi(value: Any) -> str:
     return str(value).strip().upper()
 
 
+def normalize_document(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+
+    normalized = str(value).strip().upper()
+    if not normalized:
+        return ""
+
+    if normalized.endswith(".0"):
+        candidate = normalized[:-2]
+        if candidate.isdigit():
+            normalized = candidate
+
+    if normalized.isdigit():
+        normalized = normalized.lstrip("0")
+        return normalized or "0"
+
+    return normalized
+
+
 def normalize_seller_code(value: Any) -> str:
     if pd.isna(value):
         return ""
@@ -321,11 +341,12 @@ def _paid_status(row: pd.Series) -> str:
     saldo = float(row.get("Saldo Comissão Paga Chassi", 0) or 0)
     tem_positivo = bool(row.get("Tem Pagamento Positivo", False))
     tem_negativo = bool(row.get("Tem Estorno Negativo", False))
+    documento_ja_tratado = bool(row.get("Documento Já Tratado", False))
 
     if qtd == 0 and not tem_positivo and not tem_negativo:
         return "Novo para apuração"
-    if tem_positivo and not tem_negativo and saldo > 0:
-        return "Já pago"
+    if documento_ja_tratado:
+        return "Já tratado neste documento"
     if tem_negativo and tem_positivo:
         if saldo > 0:
             return "Atenção: pagamento e estorno parcial"
@@ -334,19 +355,26 @@ def _paid_status(row: pd.Series) -> str:
         return "Atenção: comissão anterior zerada por estorno"
     if tem_negativo:
         return "Atenção: chassi com devolução/estorno histórico"
+    if tem_positivo:
+        return "Atenção: chassi com pagamento histórico em outro documento"
     return "Verificar histórico de comissões pagas"
 
 
 def apply_paid_history_filter(
     df_machine: pd.DataFrame,
     paid_summary: pd.DataFrame | None,
+    paid_document_summary: pd.DataFrame | None = None,
     excluded_summary: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Filter out clearly paid chassis while keeping negative history for review."""
+    """Filter out exact chassis/document pairs already treated while keeping chassis history for review."""
     result = df_machine.copy()
     result["__chassi_key"] = result.get("Nro Chassi", pd.Series([""] * len(result), index=result.index)).apply(
         normalize_chassi
     )
+    result["__document_key"] = result.get("Nro Documento", pd.Series([""] * len(result), index=result.index)).apply(
+        normalize_document
+    )
+    result["__pair_key"] = result["__chassi_key"] + "||" + result["__document_key"]
 
     if paid_summary is None or paid_summary.empty:
         result["Qtd Lançamentos Pagos"] = 0
@@ -375,6 +403,37 @@ def apply_paid_history_filter(
         summary = summary[keep_cols].drop_duplicates(subset=["__chassi_key"], keep="first")
         result = result.merge(summary, on="__chassi_key", how="left")
 
+    if paid_document_summary is None or paid_document_summary.empty:
+        result["Qtd Lançamentos Pagos no Documento"] = 0
+        result["Valor Comissão Histórica Documento"] = 0.0
+        result["Documento Já Tratado"] = False
+    else:
+        document_summary = paid_document_summary.copy()
+        paid_doc_chassi_col = _find_column(document_summary, ["nro_chassi", "Nro Chassi", "NRO_CHASSI"])
+        paid_doc_document_col = _find_column(document_summary, ["nro_documento", "Nro Documento", "NRO_DOCUMENTO"])
+        document_summary["__chassi_key"] = document_summary[paid_doc_chassi_col].apply(normalize_chassi)
+        document_summary["__document_key"] = document_summary[paid_doc_document_col].apply(normalize_document)
+        document_summary["__pair_key"] = document_summary["__chassi_key"] + "||" + document_summary["__document_key"]
+        document_summary = document_summary.rename(
+            columns={
+                "qtd_lancamentos_documento_pago": "Qtd Lançamentos Pagos no Documento",
+                "valor_comissao_total_documento": "Valor Comissão Histórica Documento",
+            }
+        )
+        for column in ["Qtd Lançamentos Pagos no Documento", "Valor Comissão Histórica Documento"]:
+            if column not in document_summary.columns:
+                document_summary[column] = 0
+        document_summary["Documento Já Tratado"] = True
+        document_summary = document_summary[
+            [
+                "__pair_key",
+                "Qtd Lançamentos Pagos no Documento",
+                "Valor Comissão Histórica Documento",
+                "Documento Já Tratado",
+            ]
+        ].drop_duplicates(subset=["__pair_key"], keep="first")
+        result = result.merge(document_summary, on="__pair_key", how="left")
+
     if excluded_summary is None or excluded_summary.empty:
         result["Qtd Lançamentos Excluídos"] = 0
         result["Bloqueado por Exclusão"] = False
@@ -401,22 +460,20 @@ def apply_paid_history_filter(
         "Valor Pago Histórico",
         "Valor Estornado Histórico",
         "Saldo Comissão Paga Chassi",
+        "Qtd Lançamentos Pagos no Documento",
+        "Valor Comissão Histórica Documento",
         "Qtd Lançamentos Excluídos",
     ]
     for column in numeric_columns:
         result[column] = pd.to_numeric(result[column], errors="coerce").fillna(0)
-    for column in ["Tem Pagamento Positivo", "Tem Estorno Negativo"]:
+    for column in ["Tem Pagamento Positivo", "Tem Estorno Negativo", "Documento Já Tratado"]:
         result[column] = result[column].fillna(False).astype(bool)
 
     result["Status Confronto Pagas"] = result.apply(_paid_status, axis=1)
     result.loc[result["Bloqueado por Exclusão"], "Status Confronto Pagas"] = "Excluído manualmente"
-    result["Bloqueado por Pagamento Histórico"] = (
-        result["Tem Pagamento Positivo"]
-        & ~result["Tem Estorno Negativo"]
-        & (result["Saldo Comissão Paga Chassi"] > 0)
-    )
+    result["Bloqueado por Pagamento Histórico"] = result["Documento Já Tratado"]
 
-    full_history = result.drop(columns=["__chassi_key"])
+    full_history = result.drop(columns=["__chassi_key", "__document_key", "__pair_key"])
     candidates = full_history[
         ~full_history["Bloqueado por Pagamento Histórico"]
         & ~full_history["Bloqueado por Exclusão"]
@@ -429,9 +486,10 @@ def prepare_machine_apuracao(
     fat_rates: pd.DataFrame | None,
     margin_rates: pd.DataFrame | None,
     paid_summary: pd.DataFrame | None,
+    paid_document_summary: pd.DataFrame | None = None,
     manager_relations: pd.DataFrame | None = None,
     excluded_summary: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     calculated = apply_commission_rules(df_machine, fat_rates, margin_rates)
     calculated = apply_manager_commission_rules(calculated, manager_relations)
-    return apply_paid_history_filter(calculated, paid_summary, excluded_summary)
+    return apply_paid_history_filter(calculated, paid_summary, paid_document_summary, excluded_summary)
