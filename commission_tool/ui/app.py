@@ -13,7 +13,12 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from commission_tool.config import DISPLAY_COLUMNS, STATUS_APTO, STATUS_NAO_APTO, STATUS_VERIFICAR
-from commission_tool.core.apuracao import apply_frontend_default_fat_commission, prepare_machine_apuracao
+from commission_tool.core.apuracao import (
+    EMISSION_FILTER_CUTOFF,
+    apply_frontend_default_fat_commission,
+    filter_old_emissions,
+    prepare_machine_apuracao,
+)
 from commission_tool.core.eligibility import diagnose_key_formats, run_eligibility_validation
 from commission_tool.core.formatting import format_currency_br, format_percent_br
 from commission_tool.core.paid_audit import (
@@ -27,6 +32,7 @@ from commission_tool.core.paid_audit import (
 )
 from commission_tool.core.periods import MONTH_NAMES_PT, build_period_options, default_base_period
 from commission_tool.core.reports import (
+    build_cen_analytic_reports,
     build_cen_report,
     build_filial_analytic_reports,
     build_manager_report,
@@ -52,7 +58,13 @@ from commission_tool.data.sources.postgres import (
     read_paid_commission_period_labels,
     read_paid_commissions_by_period_label,
     read_paid_commission_chassis_summary,
+    delete_paid_commission_by_id,
+    delete_paid_commissions_by_ids,
+    insert_manual_paid_commission,
+    read_manual_paid_commissions,
     read_paid_commissions,
+    read_paid_commissions_by_chassis,
+    update_manual_paid_commission,
     replace_active_manager_relations,
     replace_active_model_fat_rates,
     replace_active_model_margin_rates,
@@ -63,7 +75,11 @@ from commission_tool.data.sources.postgres import (
     save_paid_commissions,
 )
 from commission_tool.data.sources.sqlserver import get_connection
-from commission_tool.io.excel import dataframe_to_excel_download, load_commission_spreadsheet
+from commission_tool.io.excel import (
+    build_chassis_history_workbook,
+    dataframe_to_excel_download,
+    load_commission_spreadsheet,
+)
 from commission_tool.io.pdf import build_reports_pdf
 
 
@@ -479,7 +495,15 @@ def render_sidebar() -> str:
         st.markdown("### Processo")
         return st.radio(
             "Selecione a visão",
-            options=["Apurações", "Auditoria", "Comissões pagas", "Relatórios", "Configurações"],
+            options=[
+                "Apurações",
+                "Auditoria",
+                "Histórico de Chassis",
+                "Comissões pagas",
+                "Lançamento Manual",
+                "Relatórios",
+                "Configurações",
+            ],
             label_visibility="collapsed",
         )
 
@@ -528,7 +552,17 @@ def render_paid_commissions_view() -> None:
     if df_paid is not None and not df_paid.empty:
         total_paid = pd.to_numeric(df_paid.get("valor_comissao_total"), errors="coerce").sum()
         st.metric("Total pago", format_currency_br(total_paid))
-        sidebar_cols = [
+
+        st.markdown("#### Rollback (excluir e devolver para apuração)")
+        st.caption(
+            "Marque as linhas que devem ser removidas de `comissoespagas`. Após a exclusão, "
+            "o par (chassi + nº documento) deixa de estar bloqueado pelo histórico pago e "
+            "**retorna automaticamente como candidato** na próxima execução do botão "
+            "*Extrair máquinas* na seção Apurações, para nova revisão e aprovação."
+        )
+
+        editor_cols = [
+            "id",
             "mes_ano_comissao",
             "filial",
             "nro_documento",
@@ -536,17 +570,135 @@ def render_paid_commissions_view() -> None:
             "nro_chassi",
             "nome_cliente",
             "cen",
+            "cod_vendedor",
+            "tipo",
+            "classificacao_venda",
+            "fonte",
             "valor_comissao_total",
         ]
-        sidebar_cols = [col for col in sidebar_cols if col in df_paid.columns]
-        df_paid_display = df_paid[sidebar_cols].copy()
-        if "valor_comissao_total" in df_paid_display.columns:
-            df_paid_display["valor_comissao_total"] = df_paid_display["valor_comissao_total"].apply(format_currency_br)
-        st.dataframe(
-            df_paid_display,
+        editor_cols = [col for col in editor_cols if col in df_paid.columns]
+        rollback_df = df_paid[editor_cols].copy()
+
+        col_search_chassi, col_search_cen = st.columns(2)
+        with col_search_chassi:
+            filter_chassi = st.text_input(
+                "Pesquisar por Chassi",
+                value="",
+                key=f"paid_rollback_filter_chassi_{int(paid_year)}_{int(paid_month)}",
+                help="Filtra a lista abaixo por correspondência parcial no Nro Chassi.",
+            )
+        with col_search_cen:
+            filter_cen = st.text_input(
+                "Pesquisar por CEN",
+                value="",
+                key=f"paid_rollback_filter_cen_{int(paid_year)}_{int(paid_month)}",
+                help="Filtra a lista abaixo por correspondência parcial no nome do CEN.",
+            )
+
+        if filter_chassi.strip() and "nro_chassi" in rollback_df.columns:
+            pattern = filter_chassi.strip().lower()
+            rollback_df = rollback_df.loc[
+                rollback_df["nro_chassi"].fillna("").astype(str).str.lower().str.contains(pattern)
+            ]
+        if filter_cen.strip() and "cen" in rollback_df.columns:
+            pattern = filter_cen.strip().lower()
+            rollback_df = rollback_df.loc[
+                rollback_df["cen"].fillna("").astype(str).str.lower().str.contains(pattern)
+            ]
+        rollback_df = rollback_df.reset_index(drop=True)
+
+        if rollback_df.empty:
+            st.info(
+                "Nenhuma linha corresponde aos filtros de Chassi/CEN. "
+                "Limpe os campos acima para ver todas as linhas da competência."
+            )
+
+        rollback_df.insert(0, "Rollback", False)
+
+        edited_rollback = st.data_editor(
+            rollback_df,
             use_container_width=True,
             height=420,
+            hide_index=True,
+            disabled=[c for c in rollback_df.columns if c != "Rollback"],
+            column_config={
+                "Rollback": st.column_config.CheckboxColumn(
+                    "Rollback",
+                    help="Marque para excluir esta linha de comissoespagas.",
+                    default=False,
+                ),
+                "id": st.column_config.NumberColumn("id", format="%d"),
+                "valor_comissao_total": st.column_config.NumberColumn(
+                    "valor_comissao_total", format="R$ %.2f"
+                ),
+            },
+            key="paid_rollback_editor",
         )
+
+        selected_rows = edited_rollback.loc[edited_rollback["Rollback"] == True].copy()
+        selected_ids = (
+            pd.to_numeric(selected_rows["id"], errors="coerce").dropna().astype(int).tolist()
+            if "id" in selected_rows.columns
+            else []
+        )
+        selected_total = float(
+            pd.to_numeric(selected_rows.get("valor_comissao_total"), errors="coerce").fillna(0).sum()
+        )
+
+        col_rb_metric_1, col_rb_metric_2 = st.columns(2)
+        col_rb_metric_1.metric("Linhas selecionadas para rollback", len(selected_ids))
+        col_rb_metric_2.metric("Valor envolvido", format_currency_br(selected_total))
+
+        confirm_rb_key = f"paid_rollback_confirm_{int(paid_year)}_{int(paid_month)}"
+
+        col_rb_btn, _ = st.columns([1, 1])
+        with col_rb_btn:
+            if st.button(
+                "🔁 Rollback selecionadas (excluir e devolver para apuração)",
+                type="primary",
+                use_container_width=True,
+                disabled=len(selected_ids) == 0,
+                key=f"paid_rollback_btn_{int(paid_year)}_{int(paid_month)}",
+            ):
+                st.session_state[confirm_rb_key] = True
+
+        if st.session_state.get(confirm_rb_key):
+            st.error(
+                f"⚠️ Confirmar exclusão definitiva de **{len(selected_ids)} linha(s)** "
+                f"({format_currency_br(selected_total)}) de `comissoespagas`? "
+                "As linhas voltam como candidatas à apuração."
+            )
+            col_yes, col_no = st.columns(2)
+            if col_yes.button(
+                "Sim, EXCLUIR definitivamente",
+                type="primary",
+                key=f"paid_rollback_yes_{int(paid_year)}_{int(paid_month)}",
+            ):
+                try:
+                    deleted = delete_paid_commissions_by_ids(selected_ids)
+                    st.session_state[confirm_rb_key] = False
+                    st.success(
+                        f"{deleted} linha(s) excluída(s) de comissoespagas. "
+                        "Vá em **Apurações → Extrair máquinas** para reprocessar."
+                    )
+                    # Atualiza o cache de lookup para refletir a exclusão
+                    try:
+                        st.session_state.paid_commissions_lookup = read_paid_commissions(
+                            int(paid_year), int(paid_month)
+                        )
+                    except Exception:
+                        st.session_state.paid_commissions_lookup = None
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Não foi possível executar o rollback: {exc}")
+            if col_no.button(
+                "Cancelar",
+                key=f"paid_rollback_no_{int(paid_year)}_{int(paid_month)}",
+            ):
+                st.session_state[confirm_rb_key] = False
+                st.rerun()
+
+        st.divider()
 
         buf_paid = dataframe_to_excel_download(df_paid, sheet_name="Comissões Pagas")
         st.download_button(
@@ -867,6 +1019,879 @@ def render_paid_audit_view() -> None:
             st.success(f"{total_saved} linhas gravadas em comissoespagas a partir dos arquivos selecionados.")
         except Exception as exc:
             st.error(f"Não foi possível subir os arquivos selecionados: {exc}")
+
+
+_CLASSIFICACAO_OPTIONS = [
+    "Maquinas JD - Novos",
+    "Maquinas JD - Usados",
+    "Implemento",
+    "Venda Direta",
+    "Invasao de Area",
+    "Outro",
+]
+
+_TIPO_OPTIONS = ["Faturamento", "Devolução", "Ajuste", "Estorno"]
+
+
+def _safe_classificacao_index(value: object) -> int:
+    target = str(value or "").strip().lower()
+    for idx, option in enumerate(_CLASSIFICACAO_OPTIONS):
+        if option.strip().lower() == target:
+            return idx
+    return 0
+
+
+def _safe_tipo_index(value: object) -> int:
+    target = str(value or "").strip().lower()
+    for idx, option in enumerate(_TIPO_OPTIONS):
+        if option.strip().lower() == target:
+            return idx
+    return 0
+
+
+def _to_float(value: object, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _render_manual_paid_form_fields(
+    *,
+    form_key: str,
+    submit_label: str,
+    initial: dict,
+    auto_calc: bool,
+    default_emission_date: date,
+    show_delete_button: bool = False,
+    delete_label: str = "Excluir lançamento",
+) -> tuple[bool, bool, dict]:
+    """Render the manual commission form inside an st.form.
+
+    Returns:
+        primary_clicked, delete_clicked, raw_values_dict
+    `initial` keys map to MANUAL_PAID_COMMISSION_FIELDS (lowercase) plus 'fonte' and
+    'arquivo_origem'. Missing keys default to 0/empty.
+    """
+    primary = False
+    delete = False
+    values: dict = {}
+
+    with st.form(form_key, clear_on_submit=False):
+        st.markdown("#### Identificação")
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            values["tipo"] = st.selectbox(
+                "Tipo *",
+                options=_TIPO_OPTIONS,
+                index=_safe_tipo_index(initial.get("tipo")),
+                key=f"{form_key}__tipo",
+            )
+            values["filial"] = st.text_input(
+                "Filial *",
+                value=str(initial.get("filial") or ""),
+                key=f"{form_key}__filial",
+            )
+            initial_date = initial.get("data_emissao") or default_emission_date
+            if isinstance(initial_date, str):
+                try:
+                    initial_date = pd.to_datetime(initial_date).date()
+                except Exception:
+                    initial_date = default_emission_date
+            values["data_emissao"] = st.date_input(
+                "Data de Emissão *",
+                value=initial_date,
+                key=f"{form_key}__data_emissao",
+            )
+        with col_b:
+            values["nro_documento"] = st.text_input(
+                "Nro Documento *",
+                value=str(initial.get("nro_documento") or ""),
+                key=f"{form_key}__nro_documento",
+            )
+            values["nro_chassi"] = st.text_input(
+                "Nro Chassi *",
+                value=str(initial.get("nro_chassi") or ""),
+                key=f"{form_key}__nro_chassi",
+            )
+            values["modelo"] = st.text_input(
+                "Modelo *",
+                value=str(initial.get("modelo") or ""),
+                key=f"{form_key}__modelo",
+            )
+        with col_c:
+            values["nome_cliente"] = st.text_input(
+                "Nome do Cliente",
+                value=str(initial.get("nome_cliente") or ""),
+                key=f"{form_key}__nome_cliente",
+            )
+            values["classificacao_venda"] = st.selectbox(
+                "Classificação Venda *",
+                options=_CLASSIFICACAO_OPTIONS,
+                index=_safe_classificacao_index(initial.get("classificacao_venda")),
+                key=f"{form_key}__classificacao_venda",
+            )
+
+        st.markdown("#### CEN e Gerente (pré-preenchido pela seleção acima — editável)")
+        col_d, col_e, col_f = st.columns(3)
+        with col_d:
+            values["cod_vendedor"] = st.text_input(
+                "Cod Vendedor *",
+                value=str(initial.get("cod_vendedor") or ""),
+                key=f"{form_key}__cod_vendedor",
+            )
+        with col_e:
+            values["cen"] = st.text_input(
+                "CEN *",
+                value=str(initial.get("cen") or ""),
+                key=f"{form_key}__cen",
+            )
+        with col_f:
+            values["gerente"] = st.text_input(
+                "Gerente *",
+                value=str(initial.get("gerente") or ""),
+                key=f"{form_key}__gerente",
+            )
+
+        st.markdown("#### Valores base")
+        col_v1, col_v2, col_v3, col_v4 = st.columns(4)
+        values["receita_bruta"] = col_v1.number_input(
+            "Receita Bruta",
+            value=_to_float(initial.get("receita_bruta")),
+            step=0.01, format="%.2f",
+            key=f"{form_key}__receita_bruta",
+        )
+        values["cmv"] = col_v2.number_input(
+            "CMV",
+            value=_to_float(initial.get("cmv")),
+            step=0.01, format="%.2f",
+            key=f"{form_key}__cmv",
+        )
+        values["margem_rs"] = col_v3.number_input(
+            "Margem R$",
+            value=_to_float(initial.get("margem_rs")),
+            step=0.01, format="%.2f",
+            key=f"{form_key}__margem_rs",
+        )
+        values["valor_incentivo"] = col_v4.number_input(
+            "Valor Incentivo",
+            value=_to_float(initial.get("valor_incentivo")),
+            step=0.01, format="%.2f",
+            key=f"{form_key}__valor_incentivo",
+        )
+
+        col_v5, col_v6 = st.columns(2)
+        values["perc_margem_direta"] = col_v5.number_input(
+            "% Margem Direta",
+            value=_to_float(initial.get("perc_margem_direta")),
+            step=0.01, format="%.4f",
+            key=f"{form_key}__perc_margem_direta",
+        )
+        perc_margem_bruta_manual = col_v6.number_input(
+            "% Margem Bruta (manual — usado quando auto-calc estiver OFF)",
+            value=_to_float(initial.get("perc_margem_bruta")),
+            step=0.01, format="%.4f",
+            disabled=auto_calc,
+            key=f"{form_key}__perc_margem_bruta_manual",
+        )
+
+        st.markdown("#### Percentuais de Comissão")
+        col_c1, col_c2, col_c3 = st.columns(3)
+        values["perc_comissao_fat"] = col_c1.number_input(
+            "% Comissão Fat.",
+            value=_to_float(initial.get("perc_comissao_fat")),
+            step=0.01, format="%.4f",
+            key=f"{form_key}__perc_comissao_fat",
+        )
+        values["meta_margem"] = col_c2.number_input(
+            "Meta de Margem",
+            value=_to_float(initial.get("meta_margem")),
+            step=0.01, format="%.4f",
+            key=f"{form_key}__meta_margem",
+        )
+        values["perc_comissao_margem"] = col_c3.number_input(
+            "% Comissão Margem",
+            value=_to_float(initial.get("perc_comissao_margem")),
+            step=0.01, format="%.4f",
+            key=f"{form_key}__perc_comissao_margem",
+        )
+        values["perc_comissao_gerente"] = st.number_input(
+            "% Comissão Gerente",
+            value=_to_float(initial.get("perc_comissao_gerente"), default=33.0),
+            step=0.1, format="%.4f",
+            key=f"{form_key}__perc_comissao_gerente",
+        )
+
+        st.markdown(
+            f"#### Valores Derivados — modo: **{'AUTO-CALC' if auto_calc else 'MANUAL'}**"
+        )
+        st.caption(
+            "Para alternar entre auto-cálculo e digitação manual, use o checkbox "
+            "acima das abas (o estado vale para os dois formulários nesta sessão)."
+        )
+        col_d1, col_d2, col_d3 = st.columns(3)
+        valor_comissao_fat_manual = col_d1.number_input(
+            "Valor Comissão Fat. (manual)",
+            value=_to_float(initial.get("valor_comissao_fat")),
+            step=0.01, format="%.2f", disabled=auto_calc,
+            key=f"{form_key}__valor_comissao_fat_manual",
+        )
+        valor_comissao_margem_manual = col_d2.number_input(
+            "Valor Comissão Margem (manual)",
+            value=_to_float(initial.get("valor_comissao_margem")),
+            step=0.01, format="%.2f", disabled=auto_calc,
+            key=f"{form_key}__valor_comissao_margem_manual",
+        )
+        valor_comissao_total_manual = col_d3.number_input(
+            "Valor Comissão Total (manual)",
+            value=_to_float(initial.get("valor_comissao_total")),
+            step=0.01, format="%.2f", disabled=auto_calc,
+            key=f"{form_key}__valor_comissao_total_manual",
+        )
+        col_d4, col_d5, col_d6 = st.columns(3)
+        receita_bruta_incentivos_manual = col_d4.number_input(
+            "Receita Bruta + Incentivos (manual)",
+            value=_to_float(initial.get("receita_bruta_incentivos_rs")),
+            step=0.01, format="%.2f", disabled=auto_calc,
+            key=f"{form_key}__receita_bruta_incentivos_manual",
+        )
+        margem_incentivos_manual = col_d5.number_input(
+            "Margem + Incentivos (manual)",
+            value=_to_float(initial.get("margem_incentivos_rs")),
+            step=0.01, format="%.2f", disabled=auto_calc,
+            key=f"{form_key}__margem_incentivos_manual",
+        )
+        valor_comissao_gerente_manual = col_d6.number_input(
+            "Valor Comissão Gerente (manual)",
+            value=_to_float(initial.get("valor_comissao_gerente")),
+            step=0.01, format="%.2f", disabled=auto_calc,
+            key=f"{form_key}__valor_comissao_gerente_manual",
+        )
+
+        st.markdown("#### Metadados")
+        col_m1, col_m2 = st.columns(2)
+        values["fonte"] = col_m1.text_input(
+            "Fonte",
+            value=str(initial.get("fonte") or "streamlit_manual"),
+            key=f"{form_key}__fonte",
+        )
+        values["arquivo_origem"] = col_m2.text_input(
+            "Arquivo de origem (opcional)",
+            value=str(initial.get("arquivo_origem") or ""),
+            key=f"{form_key}__arquivo_origem",
+        )
+
+        # Stash manual derived values for caller use
+        values["__perc_margem_bruta_manual"] = perc_margem_bruta_manual
+        values["__valor_comissao_fat_manual"] = valor_comissao_fat_manual
+        values["__valor_comissao_margem_manual"] = valor_comissao_margem_manual
+        values["__valor_comissao_total_manual"] = valor_comissao_total_manual
+        values["__receita_bruta_incentivos_manual"] = receita_bruta_incentivos_manual
+        values["__margem_incentivos_manual"] = margem_incentivos_manual
+        values["__valor_comissao_gerente_manual"] = valor_comissao_gerente_manual
+
+        if show_delete_button:
+            col_submit, col_delete = st.columns([3, 1])
+            with col_submit:
+                primary = st.form_submit_button(
+                    submit_label, type="primary", use_container_width=True
+                )
+            with col_delete:
+                delete = st.form_submit_button(
+                    delete_label, type="secondary", use_container_width=True
+                )
+        else:
+            primary = st.form_submit_button(
+                submit_label, type="primary", use_container_width=True
+            )
+
+    return primary, delete, values
+
+
+def _validate_and_compute_payload(values: dict, auto_calc: bool) -> tuple[dict | None, list[str]]:
+    """Validate required fields and compute derived values. Returns (payload, missing)."""
+    required = {
+        "Filial": str(values.get("filial") or "").strip(),
+        "Nro Documento": str(values.get("nro_documento") or "").strip(),
+        "Nro Chassi": str(values.get("nro_chassi") or "").strip(),
+        "Modelo": str(values.get("modelo") or "").strip(),
+        "Cod Vendedor": str(values.get("cod_vendedor") or "").strip(),
+        "CEN": str(values.get("cen") or "").strip(),
+        "Gerente": str(values.get("gerente") or "").strip(),
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        return None, missing
+
+    receita_bruta_f = _to_float(values.get("receita_bruta"))
+    cmv_f = _to_float(values.get("cmv"))
+    margem_rs_f = _to_float(values.get("margem_rs"))
+    valor_incentivo_f = _to_float(values.get("valor_incentivo"))
+    perc_margem_direta_f = _to_float(values.get("perc_margem_direta"))
+    perc_comissao_fat_f = _to_float(values.get("perc_comissao_fat"))
+    meta_margem_f = _to_float(values.get("meta_margem"))
+    perc_comissao_margem_f = _to_float(values.get("perc_comissao_margem"))
+    perc_comissao_gerente_f = _to_float(values.get("perc_comissao_gerente"), default=33.0)
+
+    if auto_calc:
+        receita_bruta_incentivos = receita_bruta_f + valor_incentivo_f
+        margem_incentivos = margem_rs_f + valor_incentivo_f
+        receita_liquida_aprox = receita_bruta_f
+        perc_margem_bruta = (
+            (margem_incentivos / receita_liquida_aprox) * 100
+            if receita_liquida_aprox
+            else 0.0
+        )
+        valor_comissao_fat = receita_bruta_f * perc_comissao_fat_f / 100
+        if perc_margem_bruta >= meta_margem_f and perc_comissao_margem_f > 0:
+            valor_comissao_margem = receita_bruta_f * perc_comissao_margem_f / 100
+        else:
+            valor_comissao_margem = 0.0
+        valor_comissao_total = valor_comissao_fat + valor_comissao_margem
+        valor_comissao_gerente = valor_comissao_total * perc_comissao_gerente_f / 100
+    else:
+        receita_bruta_incentivos = _to_float(values.get("__receita_bruta_incentivos_manual"))
+        margem_incentivos = _to_float(values.get("__margem_incentivos_manual"))
+        perc_margem_bruta = _to_float(values.get("__perc_margem_bruta_manual"))
+        valor_comissao_fat = _to_float(values.get("__valor_comissao_fat_manual"))
+        valor_comissao_margem = _to_float(values.get("__valor_comissao_margem_manual"))
+        valor_comissao_total = _to_float(values.get("__valor_comissao_total_manual"))
+        valor_comissao_gerente = _to_float(values.get("__valor_comissao_gerente_manual"))
+
+    payload = {
+        "tipo": values["tipo"],
+        "filial": required["Filial"],
+        "data_emissao": values["data_emissao"],
+        "nro_documento": required["Nro Documento"],
+        "modelo": required["Modelo"],
+        "nro_chassi": required["Nro Chassi"].upper(),
+        "nome_cliente": str(values.get("nome_cliente") or "").strip(),
+        "cen": values["cen"],
+        "cod_vendedor": required["Cod Vendedor"].upper(),
+        "gerente": required["Gerente"],
+        "classificacao_venda": values["classificacao_venda"],
+        "receita_bruta": receita_bruta_f,
+        "perc_comissao_fat": perc_comissao_fat_f,
+        "valor_comissao_fat": valor_comissao_fat,
+        "cmv": cmv_f,
+        "margem_rs": margem_rs_f,
+        "perc_margem_direta": perc_margem_direta_f,
+        "valor_incentivo": valor_incentivo_f,
+        "receita_bruta_incentivos_rs": receita_bruta_incentivos,
+        "margem_incentivos_rs": margem_incentivos,
+        "meta_margem": meta_margem_f,
+        "perc_margem_bruta": perc_margem_bruta,
+        "perc_comissao_margem": perc_comissao_margem_f,
+        "valor_comissao_margem": valor_comissao_margem,
+        "valor_comissao_total": valor_comissao_total,
+        "perc_comissao_gerente": perc_comissao_gerente_f,
+        "valor_comissao_gerente": valor_comissao_gerente,
+        # metadata (separated by caller when needed)
+        "__fonte": str(values.get("fonte") or "").strip() or "streamlit_manual",
+        "__arquivo_origem": str(values.get("arquivo_origem") or "").strip() or None,
+    }
+    return payload, []
+
+
+def render_manual_paid_commission_entry() -> None:
+    st.markdown('<div class="section-title">✍️ Lançamento Manual em comissoespagas</div>', unsafe_allow_html=True)
+    st.caption(
+        "Insere/edita um lançamento direto na tabela `comissoespagas`. "
+        "Os registros aparecem em todos os relatórios (loja, CEN, gerente, analítico por CEN)."
+    )
+
+    today = date.today()
+    periods = build_period_options(today, years_back=2, years_ahead=1)
+    period_labels = [p.label for p in periods]
+    default_label = default_base_period(today).label
+    default_idx = period_labels.index(default_label) if default_label in period_labels else 0
+
+    selected_label = st.selectbox(
+        "Competência",
+        options=period_labels,
+        index=default_idx,
+        key="manual_paid_period",
+        help="Define competencia_ano, competencia_mes, mes_ano_comissao, periodo_inicio e periodo_fim.",
+    )
+    selected_period = periods[period_labels.index(selected_label)]
+    st.caption(
+        f"Janela: **{selected_period.start_date.strftime('%d/%m/%Y')}** → "
+        f"**{selected_period.end_date.strftime('%d/%m/%Y')}**"
+    )
+
+    auto_calc = st.checkbox(
+        "🧮 Calcular automaticamente os Valores Derivados (Receita+Incentivos, Margem+Incentivos, "
+        "% Margem Bruta, Valor Comissão Fat./Margem/Total e Valor Comissão Gerente)",
+        value=st.session_state.get("manual_paid_auto_calc", True),
+        key="manual_paid_auto_calc",
+        help=(
+            "LIGADO: campos derivados ficam desabilitados e são calculados a partir dos campos base. "
+            "DESLIGADO: você digita cada valor derivado manualmente. Vale para Novo e Edição."
+        ),
+    )
+
+    try:
+        manager_relations = read_manager_relations()
+    except Exception as exc:
+        st.error(f"Não foi possível carregar a tabela de gerentes/vendedores: {exc}")
+        return
+
+    if manager_relations is None or manager_relations.empty:
+        st.warning(
+            "Tabela `comissao_gerente_vendedor` vazia ou inacessível. "
+            "Cadastre vendedores em Configurações antes de fazer um lançamento manual."
+        )
+        return
+
+    relations = manager_relations.copy()
+    relations["cod_vendedor"] = relations["cod_vendedor"].fillna("").astype(str).str.strip().str.upper()
+    relations["vendedor"] = relations["vendedor"].fillna("").astype(str).str.strip()
+    relations["gerente"] = relations["gerente"].fillna("").astype(str).str.strip()
+    relations["filial"] = relations["filial"].fillna("").astype(str).str.strip()
+    relations["percentual_comissao_gerente"] = pd.to_numeric(
+        relations["percentual_comissao_gerente"], errors="coerce"
+    ).fillna(0.0)
+    relations = relations[relations["cod_vendedor"].ne("") & relations["vendedor"].ne("")].copy()
+    relations["__label"] = relations.apply(
+        lambda r: f"{r['vendedor']}  |  {r['cod_vendedor']}  |  Gerente: {r['gerente'] or '—'}",
+        axis=1,
+    )
+    relations = relations.sort_values("vendedor").reset_index(drop=True)
+
+    tab_new, tab_edit = st.tabs(["➕ Novo Lançamento", "🔍 Buscar e Editar"])
+
+    with tab_new:
+        _render_section_new(
+            relations=relations,
+            selected_period=selected_period,
+            auto_calc=auto_calc,
+        )
+
+    with tab_edit:
+        _render_section_edit(
+            relations=relations,
+            periods=periods,
+            period_labels=period_labels,
+            selected_period=selected_period,
+            auto_calc=auto_calc,
+        )
+
+
+def _render_section_new(*, relations: pd.DataFrame, selected_period, auto_calc: bool) -> None:
+    cen_label_to_row = {row["__label"]: row for _, row in relations.iterrows()}
+    cen_options = list(cen_label_to_row.keys())
+
+    selected_cen_label = st.selectbox(
+        "CEN (vendedor cadastrado em `comissao_gerente_vendedor`)",
+        options=cen_options,
+        index=0,
+        key="manual_paid_new_cen",
+        help="A seleção preenche automaticamente Cod Vendedor, Gerente e % Comissão Gerente.",
+    )
+    selected_cen = cen_label_to_row[selected_cen_label]
+    perc_gerente_default = (
+        float(selected_cen["percentual_comissao_gerente"])
+        if float(selected_cen["percentual_comissao_gerente"]) > 0
+        else 33.0
+    )
+
+    initial = {
+        "filial": selected_cen["filial"],
+        "cen": selected_cen["vendedor"],
+        "cod_vendedor": selected_cen["cod_vendedor"],
+        "gerente": selected_cen["gerente"],
+        "perc_comissao_gerente": perc_gerente_default,
+    }
+
+    primary, _, raw_values = _render_manual_paid_form_fields(
+        form_key=f"manual_paid_form_new__{selected_cen['cod_vendedor']}",
+        submit_label="Gravar lançamento em comissoespagas",
+        initial=initial,
+        auto_calc=auto_calc,
+        default_emission_date=selected_period.start_date,
+        show_delete_button=False,
+    )
+
+    if not primary:
+        return
+
+    payload, missing = _validate_and_compute_payload(raw_values, auto_calc)
+    if missing:
+        st.error(f"Preencha os campos obrigatórios: {', '.join(missing)}")
+        return
+
+    try:
+        insert_manual_paid_commission(
+            {k: v for k, v in payload.items() if not k.startswith("__")},
+            competence_year=selected_period.base_year,
+            competence_month=selected_period.base_month,
+            period_label=selected_period.label,
+            period_start=selected_period.start_date,
+            period_end=selected_period.end_date,
+            source=payload["__fonte"],
+            file_name=payload["__arquivo_origem"],
+        )
+    except Exception as exc:
+        st.error(f"Não foi possível gravar o lançamento: {exc}")
+        return
+
+    st.success(
+        f"Lançamento gravado em comissoespagas para a competência **{selected_period.label}**."
+    )
+    _show_payload_summary(selected_period.label, payload)
+
+
+def _render_section_edit(
+    *,
+    relations: pd.DataFrame,
+    periods,
+    period_labels,
+    selected_period,
+    auto_calc: bool,
+) -> None:
+    st.markdown("Filtre por competência e selecione um lançamento manual para editar ou excluir.")
+
+    col_period, col_filter = st.columns([1, 2])
+    with col_period:
+        all_periods_option = "(todas as competências)"
+        edit_filter_options = [all_periods_option] + period_labels
+        default_edit_filter = selected_period.label if selected_period.label in period_labels else all_periods_option
+        edit_filter_index = edit_filter_options.index(default_edit_filter)
+        edit_period_label = st.selectbox(
+            "Filtrar por competência",
+            options=edit_filter_options,
+            index=edit_filter_index,
+            key="manual_paid_edit_period_filter",
+        )
+    with col_filter:
+        text_filter = st.text_input(
+            "Busca livre (CEN, NF, chassi, cod_vendedor) — opcional",
+            value="",
+            key="manual_paid_edit_text_filter",
+        )
+
+    try:
+        df_manual = read_manual_paid_commissions(
+            period_label=None if edit_period_label == all_periods_option else edit_period_label
+        )
+    except Exception as exc:
+        st.error(f"Não foi possível carregar os lançamentos manuais: {exc}")
+        return
+
+    if df_manual is None or df_manual.empty:
+        st.info("Nenhum lançamento manual encontrado para o filtro selecionado.")
+        return
+
+    if text_filter.strip():
+        pattern = text_filter.strip().lower()
+        mask = (
+            df_manual["cen"].fillna("").astype(str).str.lower().str.contains(pattern)
+            | df_manual["nro_documento"].fillna("").astype(str).str.lower().str.contains(pattern)
+            | df_manual["nro_chassi"].fillna("").astype(str).str.lower().str.contains(pattern)
+            | df_manual["cod_vendedor"].fillna("").astype(str).str.lower().str.contains(pattern)
+        )
+        df_manual = df_manual.loc[mask].copy()
+        if df_manual.empty:
+            st.info("Nenhum lançamento manual bate com a busca livre.")
+            return
+
+    st.caption(f"{len(df_manual)} lançamento(s) manual(is) encontrado(s).")
+
+    list_columns = [
+        "id", "mes_ano_comissao", "tipo", "filial", "nro_documento", "nro_chassi",
+        "cen", "cod_vendedor", "gerente", "classificacao_venda",
+        "valor_comissao_fat", "valor_comissao_margem", "valor_comissao_total",
+        "fonte", "paid_at",
+    ]
+    available_cols = [c for c in list_columns if c in df_manual.columns]
+    st.dataframe(df_manual[available_cols], use_container_width=True, hide_index=True, height=240)
+
+    df_manual["__label"] = df_manual.apply(
+        lambda r: (
+            f"id {int(r['id'])} | {r.get('mes_ano_comissao', '')} | "
+            f"NF {r.get('nro_documento', '')} | Chassi {r.get('nro_chassi', '')} | "
+            f"CEN {r.get('cen', '')} | "
+            f"{format_currency_br(r.get('valor_comissao_total', 0) or 0)}"
+        ),
+        axis=1,
+    )
+    label_to_row = {row["__label"]: row for _, row in df_manual.iterrows()}
+    selected_edit_label = st.selectbox(
+        "Selecione o lançamento para editar",
+        options=list(label_to_row.keys()),
+        key="manual_paid_edit_selected",
+    )
+    if not selected_edit_label:
+        return
+    selected_row = label_to_row[selected_edit_label]
+    selected_id = int(selected_row["id"])
+
+    # Determine the period for the selected row (used for competence updates)
+    row_period_label = str(selected_row.get("mes_ano_comissao") or "").strip()
+    row_period = next((p for p in periods if p.label == row_period_label), selected_period)
+    if row_period_label and row_period_label != row_period.label:
+        st.warning(
+            f"A competência do lançamento (`{row_period_label}`) não está na lista de "
+            f"períodos atuais. Será usado o período atualmente selecionado (`{row_period.label}`) "
+            "ao atualizar."
+        )
+
+    initial = {col: selected_row.get(col) for col in selected_row.index if not col.startswith("__")}
+
+    primary, delete_clicked, raw_values = _render_manual_paid_form_fields(
+        form_key=f"manual_paid_form_edit__{selected_id}",
+        submit_label="Atualizar lançamento",
+        initial=initial,
+        auto_calc=auto_calc,
+        default_emission_date=row_period.start_date,
+        show_delete_button=True,
+        delete_label="🗑️ Excluir lançamento",
+    )
+
+    if delete_clicked:
+        confirm_key = f"manual_paid_confirm_delete_{selected_id}"
+        st.session_state[confirm_key] = True
+
+    confirm_key = f"manual_paid_confirm_delete_{selected_id}"
+    if st.session_state.get(confirm_key):
+        st.error(
+            f"⚠️ Confirmar exclusão do lançamento **id {selected_id}** "
+            f"(NF {selected_row.get('nro_documento', '')}, Chassi {selected_row.get('nro_chassi', '')}, "
+            f"CEN {selected_row.get('cen', '')})?"
+        )
+        col_yes, col_no = st.columns(2)
+        if col_yes.button("Sim, EXCLUIR definitivamente", type="primary", key=f"yes_delete_{selected_id}"):
+            try:
+                deleted = delete_paid_commission_by_id(selected_id)
+                st.session_state[confirm_key] = False
+                if deleted:
+                    st.success(f"Lançamento id {selected_id} excluído.")
+                else:
+                    st.warning(f"Nenhum registro afetado para id {selected_id}.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Não foi possível excluir: {exc}")
+        if col_no.button("Cancelar", key=f"no_delete_{selected_id}"):
+            st.session_state[confirm_key] = False
+            st.rerun()
+        return
+
+    if not primary:
+        return
+
+    payload, missing = _validate_and_compute_payload(raw_values, auto_calc)
+    if missing:
+        st.error(f"Preencha os campos obrigatórios: {', '.join(missing)}")
+        return
+
+    try:
+        rowcount = update_manual_paid_commission(
+            selected_id,
+            {k: v for k, v in payload.items() if not k.startswith("__")},
+            competence_year=row_period.base_year,
+            competence_month=row_period.base_month,
+            period_label=row_period.label,
+            period_start=row_period.start_date,
+            period_end=row_period.end_date,
+            source=payload["__fonte"],
+            file_name=payload["__arquivo_origem"],
+        )
+    except Exception as exc:
+        st.error(f"Não foi possível atualizar o lançamento: {exc}")
+        return
+
+    if rowcount == 0:
+        st.warning(f"Nenhuma linha atualizada para id {selected_id} (talvez já tenha sido removida).")
+    else:
+        st.success(
+            f"Lançamento id {selected_id} atualizado na competência **{row_period.label}**."
+        )
+        _show_payload_summary(row_period.label, payload)
+
+
+def _show_payload_summary(period_label: str, payload: dict) -> None:
+    st.markdown("**Resumo do lançamento:**")
+    summary_df = pd.DataFrame(
+        [
+            {"Campo": "Competência", "Valor": period_label},
+            {"Campo": "Tipo", "Valor": payload["tipo"]},
+            {"Campo": "Filial", "Valor": payload["filial"]},
+            {"Campo": "Nro Documento", "Valor": payload["nro_documento"]},
+            {"Campo": "Nro Chassi", "Valor": payload["nro_chassi"]},
+            {"Campo": "CEN", "Valor": payload["cen"]},
+            {"Campo": "Cod Vendedor", "Valor": payload["cod_vendedor"]},
+            {"Campo": "Gerente", "Valor": payload["gerente"]},
+            {"Campo": "Receita Bruta", "Valor": format_currency_br(payload["receita_bruta"])},
+            {"Campo": "Valor Comissão Fat.", "Valor": format_currency_br(payload["valor_comissao_fat"])},
+            {"Campo": "Valor Comissão Margem", "Valor": format_currency_br(payload["valor_comissao_margem"])},
+            {"Campo": "Valor Comissão Total", "Valor": format_currency_br(payload["valor_comissao_total"])},
+            {"Campo": "% Comissão Gerente", "Valor": f"{payload['perc_comissao_gerente']:.4f}%"},
+            {"Campo": "Valor Comissão Gerente", "Valor": format_currency_br(payload["valor_comissao_gerente"])},
+        ]
+    )
+    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+
+def render_chassis_history_validator() -> None:
+    st.markdown('<div class="section-title">🔎 Histórico de Chassis para Validação</div>', unsafe_allow_html=True)
+    st.caption(
+        "Suba o Excel exportado pelo botão *Extrair máquinas*. O sistema busca o histórico em "
+        "`comissoespagas` para todo chassi cujo *Status Confronto Pagas* seja diferente de "
+        "*Novo para apuração* e gera um Excel com uma aba por chassi."
+    )
+
+    uploaded = st.file_uploader(
+        "Arquivo .xlsx exportado da apuração de máquinas",
+        type=["xlsx"],
+        key="chassis_history_uploader",
+    )
+
+    if uploaded is None:
+        st.info("Aguardando upload do arquivo de apuração.")
+        return
+
+    try:
+        df_upload = pd.read_excel(uploaded)
+    except Exception as exc:
+        st.error(f"Não foi possível ler o arquivo: {exc}")
+        return
+
+    required_columns = {"Nro Chassi", "Status Confronto Pagas"}
+    missing = required_columns - set(df_upload.columns)
+    if missing:
+        st.error(
+            "O arquivo enviado não contém as colunas obrigatórias: "
+            f"{', '.join(sorted(missing))}. Use o Excel exportado por *Extrair máquinas*."
+        )
+        return
+
+    df_upload["Nro Chassi"] = df_upload["Nro Chassi"].fillna("").astype(str).str.strip().str.upper()
+    df_upload["Status Confronto Pagas"] = df_upload["Status Confronto Pagas"].fillna("").astype(str).str.strip()
+
+    target_mask = (
+        df_upload["Status Confronto Pagas"].ne("Novo para apuração")
+        & df_upload["Nro Chassi"].ne("")
+    )
+    df_target = df_upload.loc[target_mask].copy()
+
+    total_linhas = len(df_upload)
+    linhas_alvo = len(df_target)
+    chassis_unicos = sorted(df_target["Nro Chassi"].unique().tolist())
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Linhas no arquivo", total_linhas)
+    k2.metric("Linhas com histórico (≠ Novo)", linhas_alvo)
+    k3.metric("Chassis únicos a consultar", len(chassis_unicos))
+
+    if not chassis_unicos:
+        st.success("Nenhum chassi do arquivo possui histórico a validar. Tudo é *Novo para apuração*.")
+        return
+
+    with st.expander("Distribuição por Status Confronto Pagas no arquivo", expanded=False):
+        status_summary = (
+            df_target.groupby("Status Confronto Pagas", dropna=False)
+            .agg(Quantidade=("Nro Chassi", "count"), Chassis_Unicos=("Nro Chassi", "nunique"))
+            .reset_index()
+            .sort_values("Quantidade", ascending=False)
+        )
+        st.dataframe(status_summary, use_container_width=True, hide_index=True)
+
+    try:
+        with st.spinner(f"Consultando histórico de {len(chassis_unicos)} chassis em comissoespagas..."):
+            df_history = read_paid_commissions_by_chassis(chassis_unicos)
+    except Exception as exc:
+        st.error(f"Falha ao consultar Postgres: {exc}")
+        return
+
+    if df_history.empty:
+        st.warning(
+            "Nenhum lançamento encontrado em `comissoespagas` para os chassis identificados. "
+            "Confirme se a base Postgres está populada."
+        )
+        return
+
+    df_history["nro_chassi"] = df_history["nro_chassi"].fillna("").astype(str).str.strip().str.upper()
+    history_by_chassis: dict[str, pd.DataFrame] = {}
+    for chassis in chassis_unicos:
+        slice_df = df_history.loc[df_history["nro_chassi"].eq(chassis)].reset_index(drop=True)
+        if not slice_df.empty:
+            history_by_chassis[chassis] = slice_df
+
+    chassis_com_historico = list(history_by_chassis.keys())
+    chassis_sem_historico = [c for c in chassis_unicos if c not in history_by_chassis]
+
+    valor_col_candidates = [
+        "valor_comissao_total",
+        "valor_comissao_fat",
+    ]
+    valor_col = next((c for c in valor_col_candidates if c in df_history.columns), None)
+
+    index_rows = []
+    for chassis in chassis_com_historico:
+        slice_df = history_by_chassis[chassis]
+        soma_total = (
+            pd.to_numeric(slice_df[valor_col], errors="coerce").fillna(0.0).sum()
+            if valor_col
+            else 0.0
+        )
+        index_rows.append(
+            {
+                "Nro Chassi": chassis,
+                "Lançamentos no Histórico": len(slice_df),
+                "Valor Comissão Total Histórico": float(soma_total),
+                "Competências": ", ".join(
+                    sorted(
+                        slice_df.get("mes_ano_comissao", pd.Series(dtype=object))
+                        .fillna("")
+                        .astype(str)
+                        .str.strip()
+                        .replace("", pd.NA)
+                        .dropna()
+                        .unique()
+                        .tolist()
+                    )
+                ),
+            }
+        )
+    index_df = pd.DataFrame(
+        index_rows,
+        columns=["Nro Chassi", "Lançamentos no Histórico", "Valor Comissão Total Histórico", "Competências"],
+    )
+
+    k4, k5, k6 = st.columns(3)
+    k4.metric("Chassis com histórico", len(chassis_com_historico))
+    k5.metric("Chassis sem histórico", len(chassis_sem_historico))
+    k6.metric(
+        "Soma Comissão Histórica",
+        format_currency_br(index_df["Valor Comissão Total Histórico"].sum()) if not index_df.empty else "R$ 0,00",
+    )
+
+    if chassis_sem_historico:
+        with st.expander(f"Chassis identificados no arquivo mas sem histórico em comissoespagas ({len(chassis_sem_historico)})", expanded=False):
+            st.write(chassis_sem_historico)
+
+    st.markdown("#### Índice")
+    st.dataframe(index_df, use_container_width=True, hide_index=True)
+
+    st.markdown("#### Histórico por chassi")
+    for chassis in chassis_com_historico:
+        slice_df = history_by_chassis[chassis]
+        with st.expander(f"{chassis} — {len(slice_df)} lançamento(s)", expanded=False):
+            st.dataframe(slice_df, use_container_width=True, hide_index=True)
+
+    file_stamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+    workbook = build_chassis_history_workbook(history_by_chassis, index_df=index_df)
+    st.download_button(
+        "📥 Exportar Excel (uma aba por chassi)",
+        data=workbook,
+        file_name=f"historico_chassis_{file_stamp}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
 
 
 def render_upload_area():
@@ -1248,6 +2273,33 @@ def render_machine_extraction() -> None:
         ).fillna(0).sum()
     )
 
+    cutoff_label = EMISSION_FILTER_CUTOFF.strftime("%d/%m/%Y")
+    filter_old_emissions_enabled = st.toggle(
+        f"Filtrar Faturamento/Devolução anteriores a {cutoff_label}",
+        value=st.session_state.get("machine_filter_old_emissions_enabled", True),
+        key="machine_filter_old_emissions_enabled",
+        help=(
+            "Exclui da apuração linhas com Tipo Faturamento ou Devolução cuja Data de Emissão "
+            f"seja anterior a {cutoff_label}."
+        ),
+    )
+    previous_filter_toggle = st.session_state.get("machine_filter_old_emissions_last")
+    if previous_filter_toggle is None:
+        st.session_state.machine_filter_old_emissions_last = filter_old_emissions_enabled
+    elif previous_filter_toggle != filter_old_emissions_enabled:
+        st.session_state.machine_filter_old_emissions_last = filter_old_emissions_enabled
+        st.session_state.machine_receivable_validation_df = None
+        st.session_state.machine_pay_review_df = None
+        st.session_state.machine_exclude_review_df = None
+        st.session_state.machine_selection_state = {}
+        st.info(
+            f"A validação e as revisões foram limpas porque o filtro de emissões anteriores a {cutoff_label} foi alterado."
+        )
+
+    df_machine, old_emissions_filtered_count = filter_old_emissions(
+        df_machine, filter_old_emissions_enabled
+    )
+
     st.markdown('<div class="section-title">Tabela Única de Máquinas</div>', unsafe_allow_html=True)
 
     total_receita = pd.to_numeric(df_machine["Receita Bruta"], errors="coerce").sum()
@@ -1287,7 +2339,8 @@ def render_machine_extraction() -> None:
         f"Excluídas manualmente: "
         f"{int(pd.to_numeric(df_machine_full.get('Bloqueado por Exclusão'), errors='coerce').fillna(0).sum())} | "
         f"Sem regra fat.: {sem_regra_fat} | Sem regra margem: {sem_regra_margem} | "
-        f"Padrão 1% aplicado: {default_applied_count}"
+        f"Padrão 1% aplicado: {default_applied_count} | "
+        f"Emissões anteriores a {cutoff_label} excluídas: {old_emissions_filtered_count}"
     )
 
     export_period_label = sanitize_download_label(st.session_state.get("machine_period_label", selected_period.label))
@@ -1836,17 +2889,23 @@ def render_reports_view() -> None:
                 paid_commissions,
                 selected_period,
             )
+            cen_analytic_reports = build_cen_analytic_reports(
+                paid_commissions,
+                selected_period,
+            )
             st.session_state.cen_report_df = cen_report_df
             st.session_state.manager_report_df = manager_report_df
             st.session_state.coordinator_report_df = coordinator_report_df
             st.session_state.filial_analytic_reports = filial_analytic_reports
             st.session_state.used_implements_analytic_df = used_implements_analytic_df
+            st.session_state.cen_analytic_reports = cen_analytic_reports
             st.session_state.cen_report_period = selected_period
             st.success(
                 f"Relatórios gerados para {selected_period}: "
                 f"{len(cen_report_df)} vendedores, {len(manager_report_df)} gerentes, "
-                f"{len(coordinator_report_df)} linhas de coordenador e "
-                f"{len(filial_analytic_reports)} filial(is) analítica(s)."
+                f"{len(coordinator_report_df)} linhas de coordenador, "
+                f"{len(filial_analytic_reports)} filial(is) analítica(s) e "
+                f"{len(cen_analytic_reports)} analítico(s) por CEN."
             )
         except Exception as exc:
             st.error(f"Não foi possível gerar os relatórios: {exc}")
@@ -1857,6 +2916,7 @@ def render_reports_view() -> None:
     coordinator_report_df = st.session_state.get("coordinator_report_df")
     filial_analytic_reports = st.session_state.get("filial_analytic_reports", [])
     used_implements_analytic_df = st.session_state.get("used_implements_analytic_df")
+    cen_analytic_reports = st.session_state.get("cen_analytic_reports", [])
     report_period = st.session_state.get("cen_report_period", selected_period)
 
     if (
@@ -2014,6 +3074,57 @@ def render_reports_view() -> None:
         height=360,
         hide_index=True,
     )
+
+    st.markdown("### Analítico por CEN")
+    if not cen_analytic_reports:
+        st.info("Nenhum CEN com Valor Comissão Total > 0 nesta competência.")
+    else:
+        total_comissao_cens = sum(
+            float(
+                pd.to_numeric(df.get("Valor Comissão Total"), errors="coerce").fillna(0).sum()
+            )
+            for _, _, df in cen_analytic_reports
+        )
+        cen_summary_col_1, cen_summary_col_2 = st.columns(2)
+        cen_summary_col_1.metric("CENs com valor a receber", len(cen_analytic_reports))
+        cen_summary_col_2.metric("Valor Comissão Total", format_currency_br(total_comissao_cens))
+        st.caption(
+            "CENs com `Valor Comissão Total = 0` são omitidos. "
+            "Use o botão de exportação ao lado de cada CEN para gerar o `.xlsx` individual."
+        )
+
+        for cen_name, cod_vendedor, cen_df in cen_analytic_reports:
+            cen_total = float(
+                pd.to_numeric(cen_df.get("Valor Comissão Total"), errors="coerce").fillna(0).sum()
+            )
+            cen_header_col, cen_export_col = st.columns([3, 1])
+            with cen_header_col:
+                st.markdown(f"#### {cen_name}")
+                st.caption(
+                    f"Cód. Vendedor: `{cod_vendedor or 'N/D'}` | "
+                    f"Lançamentos: {len(cen_df)} | "
+                    f"Valor Comissão Total: **{format_currency_br(cen_total)}**"
+                )
+            with cen_export_col:
+                cen_buffer = dataframe_to_excel_download(cen_df, sheet_name="Analitico CEN")
+                file_stub = sanitize_download_label(cen_name) or sanitize_download_label(cod_vendedor) or "cen"
+                st.download_button(
+                    "Exportar .xlsx",
+                    data=cen_buffer,
+                    file_name=(
+                        f"analitico_cen_{file_stub}_"
+                        f"{sanitize_download_label(report_period)}.xlsx"
+                    ),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_cen_{cod_vendedor or cen_name}",
+                    use_container_width=True,
+                )
+            st.dataframe(
+                format_machine_display_df(cen_df),
+                use_container_width=True,
+                height=280,
+                hide_index=True,
+            )
 
 
 def prepare_rate_editor_df(df: pd.DataFrame, include_meta: bool = False) -> pd.DataFrame:
@@ -2386,8 +3497,12 @@ def main() -> None:
         render_machine_extraction()
     elif selected_view == "Auditoria":
         render_paid_audit_view()
+    elif selected_view == "Histórico de Chassis":
+        render_chassis_history_validator()
     elif selected_view == "Comissões pagas":
         render_paid_commissions_view()
+    elif selected_view == "Lançamento Manual":
+        render_manual_paid_commission_entry()
     elif selected_view == "Relatórios":
         render_reports_view()
     elif selected_view == "Configurações":

@@ -3,6 +3,7 @@ import unittest
 import pandas as pd
 
 from commission_tool.core.reports import (
+    build_cen_analytic_reports,
     build_cen_report,
     build_filial_analytic_reports,
     build_manager_report,
@@ -106,12 +107,12 @@ class ReportsTests(unittest.TestCase):
         self.assertEqual(marcio_row["Venda Direta"], 30.0)
         self.assertEqual(marcio_row["Comissão Usados"], 0.0)
         self.assertEqual(marcio_row["Comissão Implementos"], 0.0)
-        self.assertEqual(marcio_row["Comissão Invasão de área"], 0.0)
+        self.assertEqual(marcio_row["Outros"], 0.0)
         self.assertEqual(marcio_row["Comissão Margem"], 20.0)
         self.assertEqual(marcio_row["Valor Comissão Total"], 150.0)
 
         carla_row = report_df.loc[report_df["CEN"] == "CARLA SOUZA"].iloc[0]
-        self.assertEqual(carla_row["Comissão Invasão de área"], 40.0)
+        self.assertEqual(carla_row["Outros"], 40.0)
         self.assertEqual(carla_row["Comissão Margem"], 5.0)
         self.assertEqual(carla_row["Valor Comissão Total"], 45.0)
 
@@ -121,6 +122,65 @@ class ReportsTests(unittest.TestCase):
             ["Sem cod_vendedor", "Cod_vendedor sem relação CEN x Gerente"],
         )
         self.assertEqual(pending_df["Valor Comissão Total"].tolist(), [50.0, 60.0])
+
+    def test_build_cen_report_outros_column_aggregates_invasao_de_area_and_outro(self):
+        manager_relations = pd.DataFrame(
+            [
+                {
+                    "cod_vendedor": "A001",
+                    "vendedor": "MARCIO ALVES",
+                    "gerente": "hernane",
+                },
+            ]
+        )
+        paid = pd.DataFrame(
+            [
+                {
+                    "mes_ano_comissao": "Abril/2026",
+                    "cod_vendedor": "A001",
+                    "cen": "MARCIO ALVES",
+                    "classificacao_venda": "Invasão de área",
+                    "valor_comissao_fat": 10.0,
+                    "valor_comissao_margem": 0.0,
+                    "valor_comissao_total": 10.0,
+                    "nro_documento": "1",
+                    "nro_chassi": "CH1",
+                },
+                {
+                    "mes_ano_comissao": "Abril/2026",
+                    "cod_vendedor": "A001",
+                    "cen": "MARCIO ALVES",
+                    "classificacao_venda": "Outro",
+                    "valor_comissao_fat": 25.0,
+                    "valor_comissao_margem": 0.0,
+                    "valor_comissao_total": 25.0,
+                    "nro_documento": "2",
+                    "nro_chassi": "CH2",
+                },
+                {
+                    "mes_ano_comissao": "Abril/2026",
+                    "cod_vendedor": "A001",
+                    "cen": "MARCIO ALVES",
+                    "classificacao_venda": "Maquinas JD - Novos",
+                    "valor_comissao_fat": 100.0,
+                    "valor_comissao_margem": 0.0,
+                    "valor_comissao_total": 100.0,
+                    "nro_documento": "3",
+                    "nro_chassi": "CH3",
+                },
+            ]
+        )
+
+        report_df, _ = build_cen_report(paid, manager_relations, "Abril/2026")
+
+        row = report_df.iloc[0]
+        self.assertEqual(row["Comissão Faturamento"], 100.0)
+        # Outros agrega Invasão de área (10) + Outro (25) = 35
+        self.assertEqual(row["Outros"], 35.0)
+        # Total = 100 + 35 = 135
+        self.assertEqual(row["Valor Comissão Total"], 135.0)
+        # Coluna antiga não deve existir mais
+        self.assertNotIn("Comissão Invasão de área", report_df.columns)
 
     def test_build_cen_report_keeps_all_valid_sellers_even_without_commissions(self):
         manager_relations = pd.DataFrame(
@@ -476,6 +536,125 @@ class ReportsTests(unittest.TestCase):
 
         self.assertEqual(report_df["Classificação Venda"].tolist(), ["Implemento", "Maquinas JD - Usados"])
         self.assertEqual(report_df["Nro Documento"].tolist(), ["1", "2"])
+
+    def test_build_cen_analytic_reports_skips_cens_with_zero_total_and_sorts_by_name(self):
+        paid = pd.DataFrame(
+            [
+                {
+                    "mes_ano_comissao": "Abril/2026",
+                    "filial": "Loja A",
+                    "nro_documento": "1",
+                    "nro_chassi": "CH1",
+                    "nome_cliente": "Cliente 1",
+                    "cen": "MARCIO ALVES",
+                    "cod_vendedor": "A001",
+                    "classificacao_venda": "Maquinas JD - Novos",
+                    "receita_bruta": 1000.0,
+                    "valor_comissao_fat": 50.0,
+                    "margem_rs": 100.0,
+                    "perc_margem_direta": 10.0,
+                    "valor_incentivo": 0.0,
+                    "margem_incentivos_rs": 100.0,
+                    "meta_margem": 15.0,
+                    "perc_margem_bruta": 10.0,
+                    "valor_comissao_margem": 0.0,
+                    "valor_comissao_total": 50.0,
+                },
+                {
+                    "mes_ano_comissao": "Abril/2026",
+                    "filial": "Loja A",
+                    "nro_documento": "2",
+                    "nro_chassi": "CH2",
+                    "nome_cliente": "Cliente 2",
+                    "cen": "MARCIO ALVES",
+                    "cod_vendedor": "A001",
+                    "classificacao_venda": "Implemento",
+                    "receita_bruta": 500.0,
+                    "valor_comissao_fat": 5.0,
+                    "margem_rs": 50.0,
+                    "perc_margem_direta": 10.0,
+                    "valor_incentivo": 0.0,
+                    "margem_incentivos_rs": 50.0,
+                    "meta_margem": 15.0,
+                    "perc_margem_bruta": 10.0,
+                    "valor_comissao_margem": 0.0,
+                    "valor_comissao_total": 5.0,
+                },
+                {
+                    "mes_ano_comissao": "Abril/2026",
+                    "filial": "Loja B",
+                    "nro_documento": "3",
+                    "nro_chassi": "CH3",
+                    "nome_cliente": "Cliente 3",
+                    "cen": "CARLA SOUZA",
+                    "cod_vendedor": "A002",
+                    "classificacao_venda": "Maquinas JD - Novos",
+                    "receita_bruta": 2000.0,
+                    "valor_comissao_fat": 200.0,
+                    "margem_rs": 400.0,
+                    "perc_margem_direta": 20.0,
+                    "valor_incentivo": 0.0,
+                    "margem_incentivos_rs": 400.0,
+                    "meta_margem": 15.0,
+                    "perc_margem_bruta": 20.0,
+                    "valor_comissao_margem": 100.0,
+                    "valor_comissao_total": 300.0,
+                },
+                {
+                    "mes_ano_comissao": "Abril/2026",
+                    "filial": "Loja C",
+                    "nro_documento": "4",
+                    "nro_chassi": "CH4",
+                    "nome_cliente": "Cliente 4",
+                    "cen": "LUCAS MENDES",
+                    "cod_vendedor": "A003",
+                    "classificacao_venda": "Implemento",
+                    "receita_bruta": 800.0,
+                    "valor_comissao_fat": 0.0,
+                    "margem_rs": 0.0,
+                    "perc_margem_direta": 0.0,
+                    "valor_incentivo": 0.0,
+                    "margem_incentivos_rs": 0.0,
+                    "meta_margem": 0.0,
+                    "perc_margem_bruta": 0.0,
+                    "valor_comissao_margem": 0.0,
+                    "valor_comissao_total": 0.0,
+                },
+            ]
+        )
+
+        reports = build_cen_analytic_reports(paid, "Abril/2026")
+
+        # Apenas dois CENs com valor > 0 — LUCAS MENDES (total = 0) é excluído
+        self.assertEqual(len(reports), 2)
+        names = [name for name, _, _ in reports]
+        self.assertEqual(names, ["CARLA SOUZA", "MARCIO ALVES"])
+
+        carla_name, carla_cod, carla_df = reports[0]
+        self.assertEqual(carla_cod, "A002")
+        self.assertEqual(carla_df["Nro Documento"].tolist(), ["3"])
+
+        marcio_name, marcio_cod, marcio_df = reports[1]
+        self.assertEqual(marcio_cod, "A001")
+        self.assertEqual(marcio_df["Nro Documento"].tolist(), ["1", "2"])
+        self.assertAlmostEqual(
+            marcio_df["Valor Comissão Total"].sum(), 55.0,
+        )
+
+    def test_build_cen_analytic_reports_returns_empty_when_no_cen_has_value(self):
+        paid = pd.DataFrame(
+            [
+                {
+                    "mes_ano_comissao": "Abril/2026",
+                    "filial": "Loja A",
+                    "nro_documento": "1",
+                    "cen": "X",
+                    "cod_vendedor": "A001",
+                    "valor_comissao_total": 0.0,
+                },
+            ]
+        )
+        self.assertEqual(build_cen_analytic_reports(paid, "Abril/2026"), [])
 
 
 if __name__ == "__main__":

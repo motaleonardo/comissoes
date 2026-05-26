@@ -556,6 +556,233 @@ def read_paid_commission_period_labels() -> list[str]:
     return df["mes_ano_comissao"].astype(str).tolist() if not df.empty else []
 
 
+MANUAL_PAID_COMMISSION_FIELDS = [
+    "tipo",
+    "filial",
+    "data_emissao",
+    "nro_documento",
+    "modelo",
+    "nro_chassi",
+    "nome_cliente",
+    "cen",
+    "cod_vendedor",
+    "gerente",
+    "classificacao_venda",
+    "receita_bruta",
+    "perc_comissao_fat",
+    "valor_comissao_fat",
+    "cmv",
+    "margem_rs",
+    "perc_margem_direta",
+    "valor_incentivo",
+    "receita_bruta_incentivos_rs",
+    "margem_incentivos_rs",
+    "meta_margem",
+    "perc_margem_bruta",
+    "perc_comissao_margem",
+    "valor_comissao_margem",
+    "valor_comissao_total",
+    "perc_comissao_gerente",
+    "valor_comissao_gerente",
+]
+
+
+def insert_manual_paid_commission(
+    values: dict,
+    *,
+    competence_year: int,
+    competence_month: int,
+    period_label: str,
+    period_start: date | None,
+    period_end: date | None,
+    source: str = "streamlit_manual",
+    file_name: str | None = None,
+) -> int:
+    """Insert a single row in comissoespagas directly, bypassing Excel-style parsing.
+
+    `values` must already contain typed values (floats for amounts/percentages, date for
+    data_emissao, strings elsewhere). Unknown keys are ignored; missing keys become NULL.
+    Returns 1 on success.
+    """
+    from sqlalchemy import text
+
+    ensure_commission_tables()
+
+    payload: dict[str, object] = {field: values.get(field) for field in MANUAL_PAID_COMMISSION_FIELDS}
+    payload.update(
+        {
+            "competencia_ano": competence_year,
+            "competencia_mes": competence_month,
+            "mes_ano_comissao": period_label,
+            "periodo_inicio": period_start,
+            "periodo_fim": period_end,
+            "fonte": source or "streamlit_manual",
+            "arquivo_origem": file_name,
+        }
+    )
+
+    columns = [
+        "competencia_ano",
+        "competencia_mes",
+        "mes_ano_comissao",
+        "periodo_inicio",
+        "periodo_fim",
+        "fonte",
+        "arquivo_origem",
+        *MANUAL_PAID_COMMISSION_FIELDS,
+    ]
+    column_sql = ", ".join(columns)
+    placeholders_sql = ", ".join(f":{col}" for col in columns)
+
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                f"INSERT INTO {PAID_COMMISSIONS_TABLE} ({column_sql}) VALUES ({placeholders_sql})"
+            ),
+            payload,
+        )
+    return 1
+
+
+def read_manual_paid_commissions(period_label: str | None = None) -> pd.DataFrame:
+    """Read all manual entries (fonte ILIKE '%manual%'), optionally filtered by competência."""
+    from sqlalchemy import text
+
+    ensure_commission_tables()
+    engine = get_engine()
+
+    where_clauses = ["fonte ILIKE '%manual%'"]
+    params: dict = {}
+    if period_label:
+        where_clauses.append("mes_ano_comissao = :period_label")
+        params["period_label"] = period_label
+
+    where_sql = " AND ".join(where_clauses)
+    query = text(
+        f"""
+        SELECT *
+        FROM {PAID_COMMISSIONS_TABLE}
+        WHERE {where_sql}
+        ORDER BY mes_ano_comissao, paid_at DESC, id DESC
+        """
+    )
+    return pd.read_sql(query, engine, params=params)
+
+
+def update_manual_paid_commission(
+    row_id: int,
+    values: dict,
+    *,
+    competence_year: int,
+    competence_month: int,
+    period_label: str,
+    period_start: date | None,
+    period_end: date | None,
+    source: str | None = None,
+    file_name: str | None = None,
+) -> int:
+    """Update a single row in comissoespagas, identified by id. Returns rowcount."""
+    from sqlalchemy import text
+
+    ensure_commission_tables()
+
+    payload: dict[str, object] = {field: values.get(field) for field in MANUAL_PAID_COMMISSION_FIELDS}
+    payload.update(
+        {
+            "competencia_ano": competence_year,
+            "competencia_mes": competence_month,
+            "mes_ano_comissao": period_label,
+            "periodo_inicio": period_start,
+            "periodo_fim": period_end,
+            "fonte": source if source is not None else None,
+            "arquivo_origem": file_name,
+            "row_id": row_id,
+        }
+    )
+
+    set_columns = [
+        "competencia_ano",
+        "competencia_mes",
+        "mes_ano_comissao",
+        "periodo_inicio",
+        "periodo_fim",
+        "arquivo_origem",
+        *MANUAL_PAID_COMMISSION_FIELDS,
+    ]
+    if source is not None:
+        set_columns.insert(5, "fonte")  # only update fonte when caller provided one
+    set_sql = ", ".join(f"{col} = :{col}" for col in set_columns)
+
+    engine = get_engine()
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(
+                f"UPDATE {PAID_COMMISSIONS_TABLE} SET {set_sql} WHERE id = :row_id"
+            ),
+            payload,
+        )
+    return result.rowcount or 0
+
+
+def delete_paid_commission_by_id(row_id: int) -> int:
+    """Hard delete a single comissoespagas row by id. Returns rowcount."""
+    from sqlalchemy import text
+
+    ensure_commission_tables()
+    engine = get_engine()
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(f"DELETE FROM {PAID_COMMISSIONS_TABLE} WHERE id = :row_id"),
+            {"row_id": row_id},
+        )
+    return result.rowcount or 0
+
+
+def delete_paid_commissions_by_ids(row_ids: list[int]) -> int:
+    """Hard delete multiple comissoespagas rows by id in a single transaction.
+
+    Used for the "rollback" flow on the Comissões pagas screen — removes selected
+    rows so the corresponding chassi+documento pair returns to the apuração as a
+    candidate (no longer blocked by paid history).
+    """
+    from sqlalchemy import text
+
+    ensure_commission_tables()
+    cleaned_ids = sorted({int(row_id) for row_id in row_ids if row_id is not None})
+    if not cleaned_ids:
+        return 0
+
+    engine = get_engine()
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(f"DELETE FROM {PAID_COMMISSIONS_TABLE} WHERE id = ANY(:ids)"),
+            {"ids": cleaned_ids},
+        )
+    return result.rowcount or 0
+
+
+def read_paid_commissions_by_chassis(chassis: list[str]) -> pd.DataFrame:
+    """Read every paid-commission row whose normalized chassis is in the given list."""
+    from sqlalchemy import text
+
+    ensure_commission_tables()
+    normalized = sorted({str(value).strip().upper() for value in chassis if str(value).strip()})
+    if not normalized:
+        return pd.DataFrame()
+
+    engine = get_engine()
+    query = text(
+        f"""
+        SELECT *
+        FROM {PAID_COMMISSIONS_TABLE}
+        WHERE UPPER(TRIM(nro_chassi)) = ANY(:chassis)
+        ORDER BY UPPER(TRIM(nro_chassi)), competencia_ano, competencia_mes, paid_at, id
+        """
+    )
+    return pd.read_sql(query, engine, params={"chassis": normalized})
+
+
 def read_paid_commissions_by_period_label(period_label: str) -> pd.DataFrame:
     from sqlalchemy import text
 

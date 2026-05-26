@@ -104,6 +104,9 @@ def _prepare_paid_commissions_for_period(
     return paid
 
 
+_OUTROS_CLASSIFICATIONS = {"INVASAO DE AREA", "OUTRO", "OUTROS"}
+
+
 def _aggregate_cen_commission_columns(frame: pd.DataFrame) -> pd.Series:
     return pd.Series(
         {
@@ -123,8 +126,8 @@ def _aggregate_cen_commission_columns(frame: pd.DataFrame) -> pd.Series:
                 frame["__classificacao"].eq("IMPLEMENTO"),
                 "valor_comissao_fat",
             ].sum(),
-            "Comissão Invasão de área": frame.loc[
-                frame["__classificacao"].eq("INVASAO DE AREA"),
+            "Outros": frame.loc[
+                frame["__classificacao"].isin(_OUTROS_CLASSIFICATIONS),
                 "valor_comissao_fat",
             ].sum(),
             "Comissão Margem": frame["valor_comissao_margem"].sum(),
@@ -163,7 +166,7 @@ def build_cen_report(
         "Venda Direta",
         "Comissão Usados",
         "Comissão Implementos",
-        "Comissão Invasão de área",
+        "Outros",
         "Comissão Margem",
         "Valor Comissão Total",
     ]
@@ -233,7 +236,7 @@ def build_cen_report(
         + aggregated["Venda Direta"]
         + aggregated["Comissão Usados"]
         + aggregated["Comissão Implementos"]
-        + aggregated["Comissão Invasão de área"]
+        + aggregated["Outros"]
         + aggregated["Comissão Margem"]
     )
 
@@ -395,6 +398,46 @@ def build_filial_analytic_reports(
             continue
         filial_df = _sort_by_available(filial_df, ["data_emissao", "nro_documento", "nro_chassi"])
         reports.append((str(filial).strip(), _build_analytic_report_df(filial_df)))
+    return reports
+
+
+def build_cen_analytic_reports(
+    paid_commissions: pd.DataFrame | None,
+    period_label: str,
+) -> list[tuple[str, str, pd.DataFrame]]:
+    """Build one analytic report per CEN (cod_vendedor) with non-zero total commission.
+
+    Returns a list of (cen_display_name, cod_vendedor, analytic_df), sorted by CEN name.
+    CENs whose `valor_comissao_total` sums to zero are excluded.
+    """
+    paid = _prepare_paid_commissions_for_period(paid_commissions, period_label)
+    if paid.empty:
+        return []
+
+    grouped_totals = paid.groupby("__cod_vendedor", dropna=False)["valor_comissao_total"].sum()
+    eligible_codes = [code for code, total in grouped_totals.items() if float(total or 0) > 0]
+    if not eligible_codes:
+        return []
+
+    reports: list[tuple[str, str, pd.DataFrame]] = []
+    for cod in eligible_codes:
+        cen_slice = paid.loc[paid["__cod_vendedor"].eq(cod)].copy()
+        if cen_slice.empty:
+            continue
+        display_candidates = (
+            cen_slice.get("cen", pd.Series(dtype=object))
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        cen_display = next(
+            (value for value in display_candidates if value),
+            str(cod).strip() or "(sem nome)",
+        )
+        cen_slice = _sort_by_available(cen_slice, ["data_emissao", "nro_documento", "nro_chassi"])
+        reports.append((cen_display, str(cod).strip(), _build_analytic_report_df(cen_slice)))
+
+    reports.sort(key=lambda item: item[0].upper())
     return reports
 
 

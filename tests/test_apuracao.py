@@ -7,6 +7,7 @@ from commission_tool.core.apuracao import (
     apply_frontend_default_fat_commission,
     apply_manager_commission_rules,
     apply_paid_history_filter,
+    filter_old_emissions,
 )
 
 
@@ -422,6 +423,32 @@ class ApuracaoTests(unittest.TestCase):
         self.assertEqual(candidates["Nro Chassi"].tolist(), ["CH_KEEP"])
         self.assertTrue(full_history.loc[1, "Bloqueado por Exclusão"])
         self.assertIn("excluído", full_history.loc[1, "Status Confronto Pagas"].lower())
+
+    def test_filter_old_emissions_drops_faturamento_devolucao_before_cutoff(self):
+        df = pd.DataFrame(
+            [
+                {"Tipo": "Faturamento", "Data de Emissão": "30/11/2025", "Nro Chassi": "A"},
+                {"Tipo": "Devolução", "Data de Emissão": "15/10/2025", "Nro Chassi": "B"},
+                {"Tipo": "Faturamento", "Data de Emissão": "01/12/2025", "Nro Chassi": "C"},
+                {"Tipo": "Faturamento", "Data de Emissão": "10/01/2026", "Nro Chassi": "D"},
+                {"Tipo": "Outro", "Data de Emissão": "01/01/2024", "Nro Chassi": "E"},
+            ]
+        )
+
+        filtered, dropped = filter_old_emissions(df, enabled=True)
+
+        self.assertEqual(dropped, 2)
+        self.assertEqual(filtered["Nro Chassi"].tolist(), ["C", "D", "E"])
+
+    def test_filter_old_emissions_noop_when_disabled(self):
+        df = pd.DataFrame(
+            [
+                {"Tipo": "Faturamento", "Data de Emissão": "01/01/2024", "Nro Chassi": "A"},
+            ]
+        )
+        filtered, dropped = filter_old_emissions(df, enabled=False)
+        self.assertEqual(dropped, 0)
+        self.assertEqual(len(filtered), 1)
 
 
 if __name__ == "__main__":

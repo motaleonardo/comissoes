@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -18,6 +19,9 @@ IMPLEMENTO_THRESHOLD = 200000.0
 IMPLEMENTO_RATE_AT_OR_ABOVE_THRESHOLD = 0.84
 IMPLEMENTO_RATE_BELOW_THRESHOLD = 1.0
 USED_MACHINE_RATE = 1.0
+
+EMISSION_FILTER_CUTOFF = date(2025, 12, 1)
+EMISSION_FILTER_TIPOS = {"FATURAMENTO", "DEVOLUÇÃO", "DEVOLUCAO"}
 
 
 def normalize_model(value: Any) -> str:
@@ -334,6 +338,29 @@ def apply_frontend_default_fat_commission(
     result[valor_total_col] = result[valor_fat_col] + margem_values
     result["Padrão 1% Fat. Aplicado"] = default_mask.astype(bool)
     return result
+
+
+def filter_old_emissions(
+    df_machine: pd.DataFrame,
+    enabled: bool,
+    cutoff: date = EMISSION_FILTER_CUTOFF,
+) -> tuple[pd.DataFrame, int]:
+    """Drop Faturamento/Devolução rows emitted before the cutoff date when enabled."""
+    if df_machine.empty or not enabled:
+        return df_machine.reset_index(drop=True), 0
+
+    tipo_col = _find_column(df_machine, ["Tipo", "tipo"], required=False)
+    data_col = _find_column(df_machine, ["Data de Emissão", "data_emissao"], required=False)
+    if not tipo_col or not data_col:
+        return df_machine.reset_index(drop=True), 0
+
+    tipos = df_machine[tipo_col].fillna("").astype(str).str.strip().str.upper()
+    datas = pd.to_datetime(df_machine[data_col], errors="coerce", dayfirst=True)
+    cutoff_ts = pd.Timestamp(cutoff)
+
+    drop_mask = tipos.isin(EMISSION_FILTER_TIPOS) & datas.notna() & (datas < cutoff_ts)
+    filtered = df_machine.loc[~drop_mask].reset_index(drop=True)
+    return filtered, int(drop_mask.sum())
 
 
 def _paid_status(row: pd.Series) -> str:
