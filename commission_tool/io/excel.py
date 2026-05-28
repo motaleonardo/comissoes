@@ -80,6 +80,21 @@ def build_chassis_history_workbook(
     return buf
 
 
+def build_multi_sheet_workbook(sheets: list[tuple[str, pd.DataFrame]]) -> io.BytesIO:
+    buf = io.BytesIO()
+    used: set[str] = set()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        if not sheets:
+            sheets = [("Relatorio", pd.DataFrame())]
+        for sheet_name, df in sheets:
+            safe_sheet = sanitize_sheet_name(sheet_name, used)
+            frame = df if isinstance(df, pd.DataFrame) else pd.DataFrame(df)
+            _strip_datetime_tz(frame).to_excel(writer, index=False, sheet_name=safe_sheet)
+            _autosize_columns(writer.sheets[safe_sheet])
+    buf.seek(0)
+    return buf
+
+
 def dataframe_to_excel_download(
     df: pd.DataFrame,
     sheet_name: str = "Resultado Validação",
@@ -90,4 +105,3 @@ def dataframe_to_excel_download(
         _autosize_columns(writer.sheets[sheet_name])
     buf.seek(0)
     return buf
-

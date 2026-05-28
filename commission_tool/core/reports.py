@@ -9,7 +9,9 @@ import pandas as pd
 
 
 ANALYTIC_REPORT_COLUMN_MAP = [
+    ("tipo", "Tipo"),
     ("filial", "Filial"),
+    ("data_emissao", "Data de Emissão"),
     ("nro_documento", "Nro Documento"),
     ("nro_chassi", "Nro Chassi"),
     ("nome_cliente", "Nome do Cliente"),
@@ -25,6 +27,18 @@ ANALYTIC_REPORT_COLUMN_MAP = [
     ("perc_margem_bruta", "% Margem Bruta"),
     ("valor_comissao_margem", "Valor Comissão Margem"),
     ("valor_comissao_total", "Valor Comissão Total"),
+]
+
+USED_IMPLEMENT_ANALYTIC_COLUMNS = [
+    "Tipo",
+    "Filial",
+    "Data de Emissão",
+    "Nro Documento",
+    "Nro Chassi",
+    "Nome do Cliente",
+    "CEN",
+    "Classificação Venda",
+    "Receita Bruta",
 ]
 
 
@@ -145,6 +159,11 @@ def _build_analytic_report_df(frame: pd.DataFrame) -> pd.DataFrame:
     for column in ordered_columns:
         if column not in analytic.columns:
             analytic[column] = None
+    if "Data de Emissão" in analytic.columns:
+        parsed_dates = pd.to_datetime(analytic["Data de Emissão"], errors="coerce")
+        analytic["Data de Emissão"] = parsed_dates.dt.strftime("%d/%m/%Y").fillna(
+            analytic["Data de Emissão"]
+        )
     return analytic[ordered_columns].reset_index(drop=True)
 
 
@@ -357,7 +376,11 @@ def build_used_implements_coordinator_report(
         perc_comissao_margem = 0.2
         meta_margem = 15.0
         valor_comissao_fat = receita_bruta * (perc_comissao_fat / 100)
-        valor_comissao_margem = receita_bruta * (perc_comissao_margem / 100)
+        valor_comissao_margem = (
+            receita_bruta * (perc_comissao_margem / 100)
+            if mb_realizado > meta_margem
+            else 0.0
+        )
 
         rows.append(
             {
@@ -457,4 +480,8 @@ def build_used_implements_analytic_report(
         filtered,
         ["classificacao_venda", "filial", "data_emissao", "nro_documento", "nro_chassi"],
     )
-    return _build_analytic_report_df(filtered)
+    analytic = _build_analytic_report_df(filtered)
+    for column in USED_IMPLEMENT_ANALYTIC_COLUMNS:
+        if column not in analytic.columns:
+            analytic[column] = None
+    return analytic[USED_IMPLEMENT_ANALYTIC_COLUMNS].reset_index(drop=True)

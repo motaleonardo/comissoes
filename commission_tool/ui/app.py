@@ -39,6 +39,11 @@ from commission_tool.core.reports import (
     build_used_implements_analytic_report,
     build_used_implements_coordinator_report,
 )
+from commission_tool.core.report_email import (
+    ReportEmailJob,
+    build_report_email_plan,
+    group_manager_reports_by_filial,
+)
 from commission_tool.data.pipeline import (
     extract_incentive_titles,
     extract_machine_commission_base,
@@ -77,9 +82,11 @@ from commission_tool.data.sources.postgres import (
 from commission_tool.data.sources.sqlserver import get_connection
 from commission_tool.io.excel import (
     build_chassis_history_workbook,
+    build_multi_sheet_workbook,
     dataframe_to_excel_download,
     load_commission_spreadsheet,
 )
+from commission_tool.io.email import load_graph_settings, send_email_with_attachments
 from commission_tool.io.pdf import build_reports_pdf
 
 
@@ -238,6 +245,48 @@ def sanitize_download_label(label: str) -> str:
     return cleaned or "periodo"
 
 
+def build_report_email_attachments(job: ReportEmailJob, report_period: str) -> list[tuple[str, bytes]]:
+    period_stub = sanitize_download_label(report_period)
+    if job.kind == "cen":
+        report = job.reports[0]
+        file_stub = sanitize_download_label(report.cen_name) or sanitize_download_label(report.cod_vendedor) or "cen"
+        buffer = dataframe_to_excel_download(report.df, sheet_name="Analitico CEN")
+        return [(f"analitico_cen_{file_stub}_{period_stub}.xlsx", buffer.getvalue())]
+
+    if job.kind == "coordinator":
+        attachments = []
+        for label, df in job.attachments:
+            file_stub = sanitize_download_label(label)
+            buffer = dataframe_to_excel_download(df, sheet_name=label[:31])
+            attachments.append((f"{file_stub}_{period_stub}.xlsx", buffer.getvalue()))
+        return attachments
+
+    sheets = group_manager_reports_by_filial(job.reports)
+    file_stub = sanitize_download_label(job.display_name) or "gerente"
+    buffer = build_multi_sheet_workbook(sheets)
+    return [(f"analiticos_gerente_{file_stub}_{period_stub}.xlsx", buffer.getvalue())]
+
+
+def send_report_email_jobs(jobs: list[ReportEmailJob], report_period: str) -> tuple[int, list[str]]:
+    settings = load_graph_settings()
+    failures: list[str] = []
+    sent_count = 0
+    for job in jobs:
+        try:
+            send_email_with_attachments(
+                settings,
+                to=job.to,
+                cc=job.cc,
+                subject=job.subject,
+                body=job.body,
+                attachments=build_report_email_attachments(job, report_period),
+            )
+            sent_count += 1
+        except Exception as exc:
+            failures.append(f"{job.display_name} <{job.to}>: {exc}")
+    return sent_count, failures
+
+
 def refresh_machine_apuracao_state() -> None:
     df_machine_raw = st.session_state.get("machine_raw_df")
     if df_machine_raw is None:
@@ -394,9 +443,9 @@ def render_machine_audit(
 
     with st.expander("Ver detalhes da auditoria"):
         st.markdown("**Linhas e Receita Bruta**")
-        st.dataframe(display_source, use_container_width=True, hide_index=True)
+        st.dataframe(display_source, width="stretch", hide_index=True)
         st.markdown("**Incentivos**")
-        st.dataframe(incentive_comparison, use_container_width=True, hide_index=True)
+        st.dataframe(incentive_comparison, width="stretch", hide_index=True)
 
 
 def render_header() -> None:
@@ -454,7 +503,7 @@ def render_sidebar() -> str:
             username = st.text_input("Usuário SQL")
             password = st.text_input("Senha SQL", type="password")
 
-        if st.button("🔌 Testar Conexão", use_container_width=True):
+        if st.button("🔌 Testar Conexão", width="stretch"):
             if not server or not database:
                 st.error("Configure `DB_SERVER` e `DB_NAME` no arquivo `.env`.")
             else:
@@ -533,14 +582,14 @@ def render_paid_commissions_view() -> None:
     with col_schema:
         st.write("")
         st.write("")
-        if st.button("Garantir tabelas", use_container_width=True):
+        if st.button("Garantir tabelas", width="stretch"):
             try:
                 ensure_commission_tables()
                 st.success("Tabelas Postgres prontas.")
             except Exception as exc:
                 st.error(f"Não foi possível preparar as tabelas: {exc}")
 
-    if st.button("Consultar pagas", use_container_width=True):
+    if st.button("Consultar pagas", width="stretch"):
         try:
             df_paid = read_paid_commissions(int(paid_year), int(paid_month))
             st.session_state.paid_commissions_lookup = df_paid
@@ -617,7 +666,7 @@ def render_paid_commissions_view() -> None:
 
         edited_rollback = st.data_editor(
             rollback_df,
-            use_container_width=True,
+            width="stretch",
             height=420,
             hide_index=True,
             disabled=[c for c in rollback_df.columns if c != "Rollback"],
@@ -656,7 +705,7 @@ def render_paid_commissions_view() -> None:
             if st.button(
                 "🔁 Rollback selecionadas (excluir e devolver para apuração)",
                 type="primary",
-                use_container_width=True,
+                width="stretch",
                 disabled=len(selected_ids) == 0,
                 key=f"paid_rollback_btn_{int(paid_year)}_{int(paid_month)}",
             ):
@@ -706,7 +755,7 @@ def render_paid_commissions_view() -> None:
             data=buf_paid,
             file_name=f"comissoes_pagas_{int(paid_year)}_{int(paid_month):02d}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
 
     st.divider()
@@ -726,8 +775,8 @@ def render_paid_commissions_view() -> None:
     if historical_file is not None:
         try:
             df_historical = pd.read_excel(historical_file)
-            st.dataframe(df_historical.head(50), use_container_width=True, height=250)
-            if st.button("Importar histórico para comissoespagas", use_container_width=True):
+            st.dataframe(df_historical.head(50), width="stretch", height=250)
+            if st.button("Importar histórico para comissoespagas", width="stretch"):
                 saved_count = save_paid_commissions(
                     df_historical,
                     competence_year=selected_period.base_year,
@@ -766,7 +815,7 @@ def render_paid_audit_view() -> None:
     default_label = default_base_period(today).label
 
     with st.expander("Schema Postgres da tabela comissoespagas", expanded=False):
-        if st.button("Validar colunas no Postgres", use_container_width=True):
+        if st.button("Validar colunas no Postgres", width="stretch"):
             try:
                 schema_status = get_paid_commissions_schema_status()
                 st.session_state.paid_audit_schema_status = schema_status
@@ -779,7 +828,7 @@ def render_paid_audit_view() -> None:
                 st.error(f"{missing_count} colunas esperadas não foram encontradas.")
             else:
                 st.success("Colunas esperadas encontradas em comissoespagas.")
-            st.dataframe(schema_status, use_container_width=True, hide_index=True, height=260)
+            st.dataframe(schema_status, width="stretch", hide_index=True, height=260)
 
     st.divider()
     st.markdown("### Regras para validação")
@@ -794,7 +843,7 @@ def render_paid_audit_view() -> None:
         if fat_rules_file is not None:
             fat_rules_df = pd.read_excel(fat_rules_file)
             st.caption(f"{len(fat_rules_df)} linhas carregadas. Duplicidades serão preservadas.")
-            if st.button("Subir regras de faturamento para Postgres", use_container_width=True):
+            if st.button("Subir regras de faturamento para Postgres", width="stretch"):
                 try:
                     count = append_model_fat_rates(fat_rules_df)
                     st.success(f"{count} linhas de regras de faturamento inseridas.")
@@ -811,7 +860,7 @@ def render_paid_audit_view() -> None:
         if margin_rules_file is not None:
             margin_rules_df = pd.read_excel(margin_rules_file)
             st.caption(f"{len(margin_rules_df)} linhas carregadas. Duplicidades serão preservadas.")
-            if st.button("Subir regras de margem para Postgres", use_container_width=True):
+            if st.button("Subir regras de margem para Postgres", width="stretch"):
                 try:
                     count = append_model_margin_rates(margin_rules_df)
                     st.success(f"{count} linhas de regras de margem inseridas.")
@@ -857,7 +906,7 @@ def render_paid_audit_view() -> None:
     period_df = pd.DataFrame(period_rows)
     edited_period_df = st.data_editor(
         period_df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         disabled=["Arquivo"],
         column_config={
@@ -873,7 +922,7 @@ def render_paid_audit_view() -> None:
     updated_periods.update(dict(zip(edited_period_df["Arquivo"], edited_period_df["Competência"])))
     st.session_state.paid_audit_period_by_file = updated_periods
 
-    if st.button("Iniciar auditoria", type="primary", use_container_width=True):
+    if st.button("Iniciar auditoria", type="primary", width="stretch"):
         period_by_file = dict(zip(edited_period_df["Arquivo"], edited_period_df["Competência"]))
         st.session_state.paid_audit_period_by_file.update(period_by_file)
 
@@ -952,7 +1001,7 @@ def render_paid_audit_view() -> None:
         display_summary[column] = display_summary[column].apply(format_currency_br)
     edited_summary = st.data_editor(
         display_summary,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         disabled=[column for column in display_summary.columns if column != "Selecionar"],
         column_config={"Selecionar": st.column_config.CheckboxColumn("Selecionar")},
@@ -973,7 +1022,7 @@ def render_paid_audit_view() -> None:
         if all_issues.empty:
             st.success("Nenhuma inconsistência encontrada.")
         else:
-            st.dataframe(all_issues, use_container_width=True, hide_index=True, height=320)
+            st.dataframe(all_issues, width="stretch", hide_index=True, height=320)
 
     allow_failed_upload = False
     if failed_selected:
@@ -986,7 +1035,7 @@ def render_paid_audit_view() -> None:
             value=False,
         )
 
-    if st.button("Subir arquivos selecionados para Postgres", type="primary", use_container_width=True):
+    if st.button("Subir arquivos selecionados para Postgres", type="primary", width="stretch"):
         if not selected_results:
             st.warning("Selecione ao menos um arquivo para upload.")
             return
@@ -999,7 +1048,7 @@ def render_paid_audit_view() -> None:
             missing_schema = schema_status[schema_status["status"] != "OK"]
             if not missing_schema.empty:
                 st.error("Upload bloqueado. A tabela comissoespagas não está com as colunas esperadas.")
-                st.dataframe(missing_schema, use_container_width=True, hide_index=True)
+                st.dataframe(missing_schema, width="stretch", hide_index=True)
                 return
 
             total_saved = 0
@@ -1298,15 +1347,15 @@ def _render_manual_paid_form_fields(
             col_submit, col_delete = st.columns([3, 1])
             with col_submit:
                 primary = st.form_submit_button(
-                    submit_label, type="primary", use_container_width=True
+                    submit_label, type="primary", width="stretch"
                 )
             with col_delete:
                 delete = st.form_submit_button(
-                    delete_label, type="secondary", use_container_width=True
+                    delete_label, type="secondary", width="stretch"
                 )
         else:
             primary = st.form_submit_button(
-                submit_label, type="primary", use_container_width=True
+                submit_label, type="primary", width="stretch"
             )
 
     return primary, delete, values
@@ -1608,7 +1657,7 @@ def _render_section_edit(
         "fonte", "paid_at",
     ]
     available_cols = [c for c in list_columns if c in df_manual.columns]
-    st.dataframe(df_manual[available_cols], use_container_width=True, hide_index=True, height=240)
+    st.dataframe(df_manual[available_cols], width="stretch", hide_index=True, height=240)
 
     df_manual["__label"] = df_manual.apply(
         lambda r: (
@@ -1733,7 +1782,7 @@ def _show_payload_summary(period_label: str, payload: dict) -> None:
             {"Campo": "Valor Comissão Gerente", "Valor": format_currency_br(payload["valor_comissao_gerente"])},
         ]
     )
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
+    st.dataframe(summary_df, width="stretch", hide_index=True)
 
 
 def render_chassis_history_validator() -> None:
@@ -1798,7 +1847,7 @@ def render_chassis_history_validator() -> None:
             .reset_index()
             .sort_values("Quantidade", ascending=False)
         )
-        st.dataframe(status_summary, use_container_width=True, hide_index=True)
+        st.dataframe(status_summary, width="stretch", hide_index=True)
 
     try:
         with st.spinner(f"Consultando histórico de {len(chassis_unicos)} chassis em comissoespagas..."):
@@ -1875,13 +1924,13 @@ def render_chassis_history_validator() -> None:
             st.write(chassis_sem_historico)
 
     st.markdown("#### Índice")
-    st.dataframe(index_df, use_container_width=True, hide_index=True)
+    st.dataframe(index_df, width="stretch", hide_index=True)
 
     st.markdown("#### Histórico por chassi")
     for chassis in chassis_com_historico:
         slice_df = history_by_chassis[chassis]
         with st.expander(f"{chassis} — {len(slice_df)} lançamento(s)", expanded=False):
-            st.dataframe(slice_df, use_container_width=True, hide_index=True)
+            st.dataframe(slice_df, width="stretch", hide_index=True)
 
     file_stamp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
     workbook = build_chassis_history_workbook(history_by_chassis, index_df=index_df)
@@ -1890,7 +1939,7 @@ def render_chassis_history_validator() -> None:
         data=workbook,
         file_name=f"historico_chassis_{file_stamp}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
+        width="stretch",
     )
 
 
@@ -1954,12 +2003,12 @@ def render_spreadsheet_preview(df_planilha: pd.DataFrame) -> None:
             "Valor Comissão Total",
         ]
         preview_cols = [col for col in preview_cols if col in df_planilha.columns]
-        st.dataframe(df_planilha[preview_cols], use_container_width=True, height=250)
+        st.dataframe(df_planilha[preview_cols], width="stretch", height=250)
 
 
 def render_diagnostics(df_planilha: pd.DataFrame) -> None:
     with st.expander("🔍 Diagnóstico de Dados - verificar formatos antes de validar"):
-        if st.button("▶️ Executar Diagnóstico", use_container_width=True):
+        if st.button("▶️ Executar Diagnóstico", width="stretch"):
             cfg = st.session_state.conn_cfg
             try:
                 conn_diag = get_connection(**cfg)
@@ -1996,13 +2045,13 @@ def render_diagnostics(df_planilha: pd.DataFrame) -> None:
                 else:
                     st.success("✅ Dados da planilha correspondem bem ao banco de dados.")
 
-                st.dataframe(df_diag, use_container_width=True, height=300)
+                st.dataframe(df_diag, width="stretch", height=300)
             except Exception as exc:
                 st.error(f"Erro no diagnóstico: {exc}")
 
 
 def run_validation(df_planilha: pd.DataFrame) -> None:
-    if st.button("🚀 Executar Validação Completa", type="primary", use_container_width=True):
+    if st.button("🚀 Executar Validação Completa", type="primary", width="stretch"):
         cfg = st.session_state.conn_cfg
         try:
             conn = get_connection(**cfg)
@@ -2089,7 +2138,7 @@ def render_results() -> None:
     display_cols = [col for col in DISPLAY_COLUMNS if col in df_show.columns]
     st.dataframe(
         df_show[display_cols],
-        use_container_width=True,
+        width="stretch",
         height=450,
         column_config={
             "Status Geral": st.column_config.TextColumn("Status", width=120),
@@ -2110,7 +2159,7 @@ def render_results() -> None:
             data=buf_all,
             file_name=f"validacao_comissoes_{datetime.today().strftime('%Y%m%d_%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
     with col_exp2:
         df_pendencias = df_r[df_r["Status Geral"].isin([STATUS_NAO_APTO, STATUS_VERIFICAR])]
@@ -2120,7 +2169,7 @@ def render_results() -> None:
             data=buf_pendencias,
             file_name=f"pendencias_comissoes_{datetime.today().strftime('%Y%m%d_%H%M')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
 
 
@@ -2157,7 +2206,7 @@ def render_machine_extraction() -> None:
     with col_action:
         st.write("")
         st.write("")
-        extract_clicked = st.button("Extrair máquinas", type="primary", use_container_width=True)
+        extract_clicked = st.button("Extrair máquinas", type="primary", width="stretch")
 
     if not st.session_state.conn_ok:
         st.warning("Configure e teste a conexão com o banco de dados na barra lateral antes de extrair.")
@@ -2350,7 +2399,7 @@ def render_machine_extraction() -> None:
         data=export_buffer,
         file_name=f"apuracao_maquinas_{export_period_label}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=False,
+        width="content",
     )
 
     render_machine_audit(
@@ -2380,7 +2429,7 @@ def render_machine_extraction() -> None:
         history_columns = [column for column in history_columns if column in df_machine_full.columns]
         st.dataframe(
             format_machine_display_df(df_machine_full[history_columns]),
-            use_container_width=True,
+            width="stretch",
             height=320,
         )
 
@@ -2407,7 +2456,7 @@ def render_machine_extraction() -> None:
 
     edited_df = st.data_editor(
         visible_df,
-        use_container_width=True,
+        width="stretch",
         height=450,
         hide_index=True,
         disabled=[column for column in visible_df.columns if column not in ["Pagar", "Excluir"]],
@@ -2438,7 +2487,7 @@ def render_machine_extraction() -> None:
     st.markdown('<div class="section-title">Validação do Contas a Receber</div>', unsafe_allow_html=True)
     col_exclude, col_validate = st.columns(2)
     with col_exclude:
-        if st.button("Excluir comissões", use_container_width=True):
+        if st.button("Excluir comissões", width="stretch"):
             conflict_indexes = selected_indexes.intersection(excluded_indexes)
             if len(conflict_indexes) > 0:
                 st.warning(
@@ -2467,7 +2516,7 @@ def render_machine_extraction() -> None:
                 except Exception as exc:
                     st.error(f"Não foi possível excluir as comissões selecionadas: {exc}")
     with col_validate:
-        if st.button("Validar Contas a Receber", type="primary", use_container_width=True):
+        if st.button("Validar Contas a Receber", type="primary", width="stretch"):
             conflict_indexes = selected_indexes.intersection(excluded_indexes)
             if len(conflict_indexes) > 0:
                 st.warning(
@@ -2506,7 +2555,7 @@ def render_machine_extraction() -> None:
                     status.empty()
                     st.error(f"Erro durante validação do Contas a Receber: {exc}")
 
-    if st.button("Garantir tabelas Postgres", use_container_width=True):
+    if st.button("Garantir tabelas Postgres", width="stretch"):
         try:
             ensure_commission_tables()
             st.success("Tabelas Postgres prontas.")
@@ -2635,12 +2684,12 @@ def render_machine_extraction() -> None:
             data=export_validation,
             file_name=f"validacao_contas_receber_{export_period_label}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=False,
+            width="content",
         )
         st.caption(f"Exibindo {len(validation_display)} de {total_validado} registros validados.")
         st.dataframe(
             format_machine_display_df(validation_display),
-            use_container_width=True,
+            width="stretch",
             height=320,
         )
     else:
@@ -2652,7 +2701,7 @@ def render_machine_extraction() -> None:
         if st.button(
             "Pagar comissões selecionadas",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=not can_prepare_review,
         ):
             conflict_indexes = selected_indexes.intersection(excluded_indexes)
@@ -2696,7 +2745,7 @@ def render_machine_extraction() -> None:
         display_pay_review = format_machine_display_df(pay_review_df)
         edited_pay_review = st.data_editor(
             display_pay_review,
-            use_container_width=True,
+            width="stretch",
             height=280,
             hide_index=True,
             disabled=[
@@ -2712,7 +2761,7 @@ def render_machine_extraction() -> None:
         )
 
     if pay_review_df is not None:
-        if st.button("Gravar comissões revisadas", type="primary", use_container_width=True):
+        if st.button("Gravar comissões revisadas", type="primary", width="stretch"):
             pay_to_save = get_confirmed_pay_rows(pay_review_df, edited_pay_review)
 
             try:
@@ -2739,7 +2788,7 @@ def render_machine_extraction() -> None:
         st.caption("Tabela separada para auditoria dos títulos de incentivo e saldo no contas a receber.")
         st.dataframe(
             format_machine_display_df(df_incentives),
-            use_container_width=True,
+            width="stretch",
             height=350,
         )
         col_export, col_save = st.columns(2)
@@ -2753,10 +2802,10 @@ def render_machine_extraction() -> None:
                     f"{sanitize_download_label(st.session_state.get('machine_period_label', 'periodo'))}.xlsx"
                 ),
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
+                width="stretch",
             )
         with col_save:
-            if st.button("Salvar títulos no Postgres", use_container_width=True):
+            if st.button("Salvar títulos no Postgres", width="stretch"):
                 try:
                     save_incentive_titles(df_incentives)
                     st.success("Títulos de incentivo salvos no Postgres.")
@@ -2773,8 +2822,8 @@ def render_machine_extraction() -> None:
         if historical_file is not None:
             try:
                 df_historical = pd.read_excel(historical_file)
-                st.dataframe(df_historical.head(50), use_container_width=True, height=250)
-                if st.button("Importar histórico para comissoespagas", use_container_width=True):
+                st.dataframe(df_historical.head(50), width="stretch", height=250)
+                if st.button("Importar histórico para comissoespagas", width="stretch"):
                     saved_count = save_paid_commissions(
                         df_historical,
                         competence_year=selected_period.base_year,
@@ -2799,8 +2848,8 @@ def render_machine_extraction() -> None:
         if fat_file is not None:
             try:
                 df_fat = pd.read_excel(fat_file)
-                st.dataframe(df_fat.head(30), use_container_width=True, height=180)
-                if st.button("Salvar % faturamento por modelo", use_container_width=True):
+                st.dataframe(df_fat.head(30), width="stretch", height=180)
+                if st.button("Salvar % faturamento por modelo", width="stretch"):
                     count = save_model_fat_rates(df_fat)
                     st.success(f"{count} modelos salvos em comissao_faturamento_modelo.")
             except Exception as exc:
@@ -2814,12 +2863,103 @@ def render_machine_extraction() -> None:
         if margin_file is not None:
             try:
                 df_margin = pd.read_excel(margin_file)
-                st.dataframe(df_margin.head(30), use_container_width=True, height=180)
-                if st.button("Salvar % margem por modelo", use_container_width=True):
+                st.dataframe(df_margin.head(30), width="stretch", height=180)
+                if st.button("Salvar % margem por modelo", width="stretch"):
                     count = save_model_margin_rates(df_margin)
                     st.success(f"{count} modelos salvos em comissao_margem_modelo.")
             except Exception as exc:
                 st.error(f"Não foi possível salvar percentuais de margem: {exc}")
+
+
+def render_report_email_section(
+    cen_analytic_reports: list[tuple[str, str, pd.DataFrame]],
+    manager_relations: pd.DataFrame,
+    coordinator_report_df: pd.DataFrame,
+    used_implements_analytic_df: pd.DataFrame,
+    report_period: str,
+) -> None:
+    st.markdown("### Envio por e-mail")
+    test_recipient = os.getenv("REPORT_EMAIL_TEST_RECIPIENT", "leonardo.mota@grupoluizhohl.com.br").strip()
+    production_cc = os.getenv("REPORT_EMAIL_PRODUCTION_CC", "suelen.santana@grupoluizhohl.com.br").strip()
+
+    test_plan = build_report_email_plan(
+        cen_analytic_reports,
+        manager_relations,
+        report_period,
+        mode="test",
+        test_recipient=test_recipient,
+        production_cc=production_cc,
+        coordinator_report_df=coordinator_report_df,
+        coordinator_analytic_df=used_implements_analytic_df,
+    )
+    production_plan = build_report_email_plan(
+        cen_analytic_reports,
+        manager_relations,
+        report_period,
+        mode="production",
+        test_recipient=test_recipient,
+        production_cc=production_cc,
+        coordinator_report_df=coordinator_report_df,
+        coordinator_analytic_df=used_implements_analytic_df,
+    )
+
+    preview_rows = [
+        {
+            "Tipo": {
+                "cen": "CEN",
+                "manager": "Gerente",
+                "coordinator": "Coordenador",
+            }.get(job.kind, job.kind),
+            "Nome": job.display_name,
+            "Para produção": job.to,
+            "Cópia produção": ", ".join(job.cc),
+            "Qtd. CENs no anexo": len(job.reports),
+            "Qtd. arquivos": len(job.attachments) if job.kind == "coordinator" else 1,
+        }
+        for job in production_plan.jobs
+    ]
+    if preview_rows:
+        st.caption(
+            f"Modo teste envia todos os {len(test_plan.jobs)} e-mail(s) para {test_recipient}. "
+            f"Modo produção copia {production_cc} em todos os envios."
+        )
+        st.dataframe(pd.DataFrame(preview_rows), width="stretch", hide_index=True, height=220)
+    else:
+        st.warning("Nenhum destinatário elegível para envio.")
+
+    if production_plan.issues:
+        st.warning("Pendências para produção:")
+        for issue in production_plan.issues:
+            st.write(f"- {issue}")
+
+    col_test, col_prod = st.columns(2)
+    with col_test:
+        if st.button("Enviar TESTE", width="stretch", disabled=not test_plan.jobs):
+            with st.spinner("Enviando e-mails de teste..."):
+                sent_count, failures = send_report_email_jobs(test_plan.jobs, report_period)
+            if failures:
+                st.error(f"{sent_count} e-mail(s) enviados; {len(failures)} falha(s).")
+                for failure in failures:
+                    st.write(f"- {failure}")
+            else:
+                st.success(f"{sent_count} e-mail(s) de teste enviados para {test_recipient}.")
+
+    with col_prod:
+        confirm_production = st.checkbox("Confirmo envio em produção", key="confirm_report_email_production")
+        if st.button(
+            "Enviar PRODUÇÃO",
+            type="primary",
+            width="stretch",
+            disabled=not production_plan.jobs or not confirm_production,
+        ):
+            with st.spinner("Enviando e-mails em produção..."):
+                sent_count, failures = send_report_email_jobs(production_plan.jobs, report_period)
+            if failures:
+                st.error(f"{sent_count} e-mail(s) enviados; {len(failures)} falha(s).")
+                for failure in failures:
+                    st.write(f"- {failure}")
+            else:
+                st.success(f"{sent_count} e-mail(s) enviados em produção.")
 
 
 def render_spreadsheet_validation_flow() -> None:
@@ -2863,7 +3003,7 @@ def render_reports_view() -> None:
         index=0,
     )
 
-    if st.button("Gerar relatórios", type="primary", use_container_width=True):
+    if st.button("Gerar relatórios", type="primary", width="stretch"):
         try:
             paid_commissions = read_paid_commissions_by_period_label(selected_period)
             manager_relations = read_manager_relations()
@@ -2899,6 +3039,7 @@ def render_reports_view() -> None:
             st.session_state.filial_analytic_reports = filial_analytic_reports
             st.session_state.used_implements_analytic_df = used_implements_analytic_df
             st.session_state.cen_analytic_reports = cen_analytic_reports
+            st.session_state.report_manager_relations_df = manager_relations
             st.session_state.cen_report_period = selected_period
             st.success(
                 f"Relatórios gerados para {selected_period}: "
@@ -2917,6 +3058,7 @@ def render_reports_view() -> None:
     filial_analytic_reports = st.session_state.get("filial_analytic_reports", [])
     used_implements_analytic_df = st.session_state.get("used_implements_analytic_df")
     cen_analytic_reports = st.session_state.get("cen_analytic_reports", [])
+    report_manager_relations = st.session_state.get("report_manager_relations_df")
     report_period = st.session_state.get("cen_report_period", selected_period)
 
     if (
@@ -2968,7 +3110,7 @@ def render_reports_view() -> None:
                 data=reports_pdf,
                 file_name=f"relatorios_comissoes_{sanitize_download_label(report_period)}.pdf",
                 mime="application/pdf",
-                use_container_width=True,
+                width="stretch",
             )
         else:
             st.error(f"Não foi possível gerar o PDF: {reports_pdf_error}")
@@ -2980,11 +3122,23 @@ def render_reports_view() -> None:
             data=report_buffer,
             file_name=f"relatorio_cen_{sanitize_download_label(report_period)}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
+            width="stretch",
         )
+
+    if report_manager_relations is not None:
+        render_report_email_section(
+            cen_analytic_reports,
+            report_manager_relations,
+            coordinator_report_df,
+            used_implements_analytic_df,
+            report_period,
+        )
+    else:
+        st.warning("Gere os relatórios novamente para habilitar o envio por e-mail.")
+
     st.dataframe(
         format_machine_display_df(cen_report_df),
-        use_container_width=True,
+        width="stretch",
         height=420,
         hide_index=True,
     )
@@ -3011,11 +3165,11 @@ def render_reports_view() -> None:
         data=manager_buffer,
         file_name=f"relatorio_gerentes_{sanitize_download_label(report_period)}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=False,
+        width="content",
     )
     st.dataframe(
         format_machine_display_df(manager_report_df),
-        use_container_width=True,
+        width="stretch",
         height=360,
         hide_index=True,
     )
@@ -3029,7 +3183,7 @@ def render_reports_view() -> None:
             st.markdown(f"#### {filial}")
             st.dataframe(
                 format_machine_display_df(filial_df),
-                use_container_width=True,
+                width="stretch",
                 height=280,
                 hide_index=True,
             )
@@ -3058,11 +3212,11 @@ def render_reports_view() -> None:
         data=coordinator_buffer,
         file_name=f"relatorio_coordenador_seminovos_implementos_{sanitize_download_label(report_period)}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=False,
+        width="content",
     )
     st.dataframe(
         format_machine_display_df(coordinator_report_df),
-        use_container_width=True,
+        width="stretch",
         height=260,
         hide_index=True,
     )
@@ -3070,7 +3224,7 @@ def render_reports_view() -> None:
     st.markdown("### Analítico de Implementos e Usados")
     st.dataframe(
         format_machine_display_df(used_implements_analytic_df),
-        use_container_width=True,
+        width="stretch",
         height=360,
         hide_index=True,
     )
@@ -3117,11 +3271,11 @@ def render_reports_view() -> None:
                     ),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key=f"download_cen_{cod_vendedor or cen_name}",
-                    use_container_width=True,
+                    width="stretch",
                 )
             st.dataframe(
                 format_machine_display_df(cen_df),
-                use_container_width=True,
+                width="stretch",
                 height=280,
                 hide_index=True,
             )
@@ -3152,6 +3306,7 @@ def prepare_manager_relation_editor_df(df: pd.DataFrame) -> pd.DataFrame:
         "data_nascimento",
         "cpf",
         "email",
+        "email_gerente",
         "contato",
         "percentual_comissao_gerente",
         "ativo",
@@ -3175,7 +3330,7 @@ def _render_settings_view_legacy() -> None:
 
     col_schema, _ = st.columns([1, 2])
     with col_schema:
-        if st.button("Garantir tabelas Postgres", use_container_width=True):
+        if st.button("Garantir tabelas Postgres", width="stretch"):
             try:
                 ensure_commission_tables()
                 st.success("Tabelas Postgres prontas.")
@@ -3192,8 +3347,8 @@ def _render_settings_view_legacy() -> None:
     if fat_file is not None:
         try:
             df_fat = pd.read_excel(fat_file)
-            st.dataframe(df_fat.head(50), use_container_width=True, height=250)
-            if st.button("Salvar % faturamento por modelo", use_container_width=True):
+            st.dataframe(df_fat.head(50), width="stretch", height=250)
+            if st.button("Salvar % faturamento por modelo", width="stretch"):
                 count = replace_active_model_fat_rates(df_fat)
                 st.success(f"{count} modelos salvos em comissao_faturamento_modelo.")
         except Exception as exc:
@@ -3209,8 +3364,8 @@ def _render_settings_view_legacy() -> None:
     if margin_file is not None:
         try:
             df_margin = pd.read_excel(margin_file)
-            st.dataframe(df_margin.head(50), use_container_width=True, height=250)
-            if st.button("Salvar % margem por modelo", use_container_width=True):
+            st.dataframe(df_margin.head(50), width="stretch", height=250)
+            if st.button("Salvar % margem por modelo", width="stretch"):
                 count = replace_active_model_margin_rates(df_margin)
                 st.success(f"{count} modelos salvos em comissao_margem_modelo.")
         except Exception as exc:
@@ -3223,14 +3378,14 @@ def render_settings_view() -> None:
 
     col_schema, col_load = st.columns([1, 1])
     with col_schema:
-        if st.button("Garantir tabelas Postgres", use_container_width=True):
+        if st.button("Garantir tabelas Postgres", width="stretch"):
             try:
                 ensure_commission_tables()
                 st.success("Tabelas Postgres prontas.")
             except Exception as exc:
                 st.error(f"Não foi possível preparar as tabelas: {exc}")
     with col_load:
-        if st.button("Carregar regras atuais", use_container_width=True):
+        if st.button("Carregar regras atuais", width="stretch"):
             try:
                 st.session_state.settings_fat_rates_df = prepare_rate_editor_df(read_model_fat_rates())
                 st.session_state.settings_margin_rates_df = prepare_rate_editor_df(
@@ -3254,8 +3409,8 @@ def render_settings_view() -> None:
     if fat_file is not None:
         try:
             df_fat = pd.read_excel(fat_file)
-            st.dataframe(df_fat.head(50), use_container_width=True, height=250)
-            if st.button("Salvar % faturamento por modelo", use_container_width=True):
+            st.dataframe(df_fat.head(50), width="stretch", height=250)
+            if st.button("Salvar % faturamento por modelo", width="stretch"):
                 count = replace_active_model_fat_rates(df_fat)
                 st.session_state.settings_fat_rates_df = prepare_rate_editor_df(read_model_fat_rates())
                 st.success(f"{count} modelos salvos em comissao_faturamento_modelo.")
@@ -3273,7 +3428,7 @@ def render_settings_view() -> None:
     if df_fat_current is not None:
         edited_fat = st.data_editor(
             df_fat_current,
-            use_container_width=True,
+            width="stretch",
             height=320,
             num_rows="dynamic",
             disabled=["updated_at"],
@@ -3286,7 +3441,7 @@ def render_settings_view() -> None:
             },
             key="settings_fat_rates_editor",
         )
-        if st.button("Salvar alterações de faturamento", type="primary", use_container_width=True):
+        if st.button("Salvar alterações de faturamento", type="primary", width="stretch"):
             try:
                 count = replace_active_model_fat_rates(edited_fat)
                 st.session_state.settings_fat_rates_df = prepare_rate_editor_df(read_model_fat_rates())
@@ -3304,8 +3459,8 @@ def render_settings_view() -> None:
     if margin_file is not None:
         try:
             df_margin = pd.read_excel(margin_file)
-            st.dataframe(df_margin.head(50), use_container_width=True, height=250)
-            if st.button("Salvar % margem por modelo", use_container_width=True):
+            st.dataframe(df_margin.head(50), width="stretch", height=250)
+            if st.button("Salvar % margem por modelo", width="stretch"):
                 count = replace_active_model_margin_rates(df_margin)
                 st.session_state.settings_margin_rates_df = prepare_rate_editor_df(
                     read_model_margin_rates(),
@@ -3329,7 +3484,7 @@ def render_settings_view() -> None:
     if df_margin_current is not None:
         edited_margin = st.data_editor(
             df_margin_current,
-            use_container_width=True,
+            width="stretch",
             height=320,
             num_rows="dynamic",
             disabled=["updated_at"],
@@ -3343,7 +3498,7 @@ def render_settings_view() -> None:
             },
             key="settings_margin_rates_editor",
         )
-        if st.button("Salvar alterações de margem", type="primary", use_container_width=True):
+        if st.button("Salvar alterações de margem", type="primary", width="stretch"):
             try:
                 count = replace_active_model_margin_rates(edited_margin)
                 st.session_state.settings_margin_rates_df = prepare_rate_editor_df(
@@ -3363,8 +3518,8 @@ def render_settings_view() -> None:
     if manager_file is not None:
         try:
             df_manager = pd.read_excel(manager_file)
-            st.dataframe(df_manager.head(50), use_container_width=True, height=250)
-            if st.button("Salvar relação CEN x Gerente", use_container_width=True):
+            st.dataframe(df_manager.head(50), width="stretch", height=250)
+            if st.button("Salvar relação CEN x Gerente", width="stretch"):
                 count = replace_active_manager_relations(df_manager)
                 st.session_state.settings_manager_relations_df = prepare_manager_relation_editor_df(
                     read_manager_relations()
@@ -3386,7 +3541,7 @@ def render_settings_view() -> None:
     if df_manager_current is not None:
         edited_manager = st.data_editor(
             df_manager_current,
-            use_container_width=True,
+            width="stretch",
             height=360,
             num_rows="dynamic",
             disabled=["updated_at"],
@@ -3398,7 +3553,8 @@ def render_settings_view() -> None:
                 "vendedor": st.column_config.TextColumn("Vendedor"),
                 "data_nascimento": st.column_config.TextColumn("Data de Nascimento"),
                 "cpf": st.column_config.TextColumn("CPF"),
-                "email": st.column_config.TextColumn("E-mail"),
+                "email": st.column_config.TextColumn("E-mail CEN"),
+                "email_gerente": st.column_config.TextColumn("E-mail Gerente"),
                 "contato": st.column_config.TextColumn("Contato"),
                 "percentual_comissao_gerente": st.column_config.NumberColumn("% ComissÃ£o Gerente", format="%.4f"),
                 "ativo": st.column_config.CheckboxColumn("Ativo", default=True),
@@ -3406,7 +3562,7 @@ def render_settings_view() -> None:
             },
             key="settings_manager_relations_editor",
         )
-        if st.button("Salvar alterações de CEN x Gerente", type="primary", use_container_width=True):
+        if st.button("Salvar alterações de CEN x Gerente", type="primary", width="stretch"):
             try:
                 count = replace_active_manager_relations(edited_manager)
                 st.session_state.settings_manager_relations_df = prepare_manager_relation_editor_df(

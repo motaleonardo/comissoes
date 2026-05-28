@@ -235,6 +235,7 @@ def ensure_commission_tables() -> None:
                     data_nascimento TEXT,
                     cpf TEXT,
                     email TEXT,
+                    email_gerente TEXT,
                     contato TEXT,
                     percentual_comissao_gerente NUMERIC(12, 6) NOT NULL DEFAULT 33,
                     ativo BOOLEAN NOT NULL DEFAULT TRUE,
@@ -246,6 +247,7 @@ def ensure_commission_tables() -> None:
         conn.execute(text(f"ALTER TABLE {FAT_RATE_TABLE} DROP CONSTRAINT IF EXISTS {FAT_RATE_TABLE}_modelo_key"))
         conn.execute(text(f"ALTER TABLE {MARGIN_RATE_TABLE} DROP CONSTRAINT IF EXISTS {MARGIN_RATE_TABLE}_modelo_key"))
         conn.execute(text(f"ALTER TABLE {MANAGER_RELATION_TABLE} DROP CONSTRAINT IF EXISTS {MANAGER_RELATION_TABLE}_cod_vendedor_key"))
+        conn.execute(text(f"ALTER TABLE {MANAGER_RELATION_TABLE} ADD COLUMN IF NOT EXISTS email_gerente TEXT"))
         conn.execute(text(f"ALTER TABLE {PAID_COMMISSIONS_TABLE} ADD COLUMN IF NOT EXISTS cod_vendedor TEXT"))
         conn.execute(text(f"ALTER TABLE {PAID_COMMISSIONS_TABLE} ADD COLUMN IF NOT EXISTS gerente TEXT"))
         conn.execute(text(f"ALTER TABLE {PAID_COMMISSIONS_TABLE} ADD COLUMN IF NOT EXISTS perc_comissao_gerente NUMERIC(12, 6)"))
@@ -943,6 +945,7 @@ def read_manager_relations() -> pd.DataFrame:
             data_nascimento,
             cpf,
             email,
+            email_gerente,
             contato,
             CASE
                 WHEN ABS(percentual_comissao_gerente) <= 1 AND percentual_comissao_gerente <> 0
@@ -1142,6 +1145,11 @@ def _prepare_manager_relations(df: pd.DataFrame) -> pd.DataFrame:
     )
     cpf_col = _find_column(df, ["CPF", "cpf"], required=False)
     email_col = _find_column(df, ["E-mail", "Email", "email"], required=False)
+    manager_email_col = _find_column(
+        df,
+        ["E-mail Gerente", "Email Gerente", "email_gerente", "e-mail_gerente"],
+        required=False,
+    )
     contato_col = _find_column(df, ["Contato", "contato"], required=False)
     pct_col = _find_column(
         df,
@@ -1165,6 +1173,7 @@ def _prepare_manager_relations(df: pd.DataFrame) -> pd.DataFrame:
             "data_nascimento": df[nascimento_col] if nascimento_col else None,
             "cpf": df[cpf_col] if cpf_col else None,
             "email": df[email_col] if email_col else None,
+            "email_gerente": df[manager_email_col] if manager_email_col else None,
             "contato": df[contato_col] if contato_col else None,
             "percentual_comissao_gerente": (
                 df[pct_col] if pct_col else DEFAULT_MANAGER_COMMISSION_PERCENT

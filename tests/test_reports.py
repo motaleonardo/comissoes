@@ -376,7 +376,7 @@ class ReportsTests(unittest.TestCase):
                     "receita_bruta": 80000.0,
                     "margem_incentivos_rs": 5000.0,
                     "receita_bruta_incentivos_rs": 85000.0,
-                    "perc_margem_bruta": 12.0,
+                    "perc_margem_bruta": 16.0,
                 },
                 {
                     "mes_ano_comissao": "Abril/2026",
@@ -405,15 +405,15 @@ class ReportsTests(unittest.TestCase):
         self.assertEqual(implemento_row["Meta Margem"], 15.0)
         self.assertAlmostEqual(implemento_row["% MB Realizado"], (10.0 * 120000.0 + 20.0 * 55000.0) / 175000.0)
         self.assertEqual(implemento_row["% Comissão Margem"], 0.2)
-        self.assertEqual(implemento_row["Valor Comissão Margem"], 300.0)
-        self.assertEqual(implemento_row["Valor Total da Comissão"], 600.0)
+        self.assertEqual(implemento_row["Valor Comissão Margem"], 0.0)
+        self.assertEqual(implemento_row["Valor Total da Comissão"], 300.0)
 
         usados_row = report_df.loc[report_df["Tipo"] == "Maquinas JD - Usados"].iloc[0]
         self.assertEqual(usados_row["Receita Bruta"], 80000.0)
         self.assertEqual(usados_row["Valor Comissão Fat."], 160.0)
         self.assertEqual(usados_row["Margem + Incentivos R$"], 5000.0)
         self.assertEqual(usados_row["Meta Margem"], 15.0)
-        self.assertEqual(usados_row["% MB Realizado"], 12.0)
+        self.assertEqual(usados_row["% MB Realizado"], 16.0)
         self.assertEqual(usados_row["Valor Comissão Margem"], 160.0)
         self.assertEqual(usados_row["Valor Total da Comissão"], 320.0)
 
@@ -536,6 +536,10 @@ class ReportsTests(unittest.TestCase):
 
         self.assertEqual(report_df["Classificação Venda"].tolist(), ["Implemento", "Maquinas JD - Usados"])
         self.assertEqual(report_df["Nro Documento"].tolist(), ["1", "2"])
+        self.assertIn("Receita Bruta", report_df.columns)
+        self.assertNotIn("Valor Comissão Fat.", report_df.columns)
+        self.assertNotIn("Valor Comissão Margem", report_df.columns)
+        self.assertNotIn("Valor Comissão Total", report_df.columns)
 
     def test_build_cen_analytic_reports_skips_cens_with_zero_total_and_sorts_by_name(self):
         paid = pd.DataFrame(
@@ -655,6 +659,42 @@ class ReportsTests(unittest.TestCase):
             ]
         )
         self.assertEqual(build_cen_analytic_reports(paid, "Abril/2026"), [])
+
+    def test_analytic_reports_include_invoice_issue_date(self):
+        paid = pd.DataFrame(
+            [
+                {
+                    "mes_ano_comissao": "Abril/2026",
+                    "tipo": "Faturamento",
+                    "filial": "Loja A",
+                    "data_emissao": "2026-04-10",
+                    "nro_documento": "1",
+                    "nro_chassi": "CH1",
+                    "nome_cliente": "Cliente 1",
+                    "cen": "MARCIO ALVES",
+                    "cod_vendedor": "A001",
+                    "classificacao_venda": "Maquinas JD - Novos",
+                    "receita_bruta": 1000.0,
+                    "valor_comissao_fat": 50.0,
+                    "margem_rs": 100.0,
+                    "perc_margem_direta": 10.0,
+                    "valor_incentivo": 0.0,
+                    "margem_incentivos_rs": 100.0,
+                    "meta_margem": 15.0,
+                    "perc_margem_bruta": 10.0,
+                    "valor_comissao_margem": 0.0,
+                    "valor_comissao_total": 50.0,
+                }
+            ]
+        )
+
+        reports = build_cen_analytic_reports(paid, "Abril/2026")
+        _, _, analytic_df = reports[0]
+
+        self.assertIn("Tipo", analytic_df.columns)
+        self.assertEqual(analytic_df.loc[0, "Tipo"], "Faturamento")
+        self.assertIn("Data de Emissão", analytic_df.columns)
+        self.assertEqual(analytic_df.loc[0, "Data de Emissão"], "10/04/2026")
 
 
 if __name__ == "__main__":

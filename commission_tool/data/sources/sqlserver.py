@@ -7,6 +7,7 @@ focused on business rules.
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -41,6 +42,16 @@ def get_connection(
         )
 
     return pyodbc.connect(conn_str, timeout=10)
+
+
+def _read_sql(sql: str, conn, **kwargs) -> pd.DataFrame:
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="pandas only supports SQLAlchemy connectable.*",
+            category=UserWarning,
+        )
+        return pd.read_sql(sql, conn, **kwargs)
 
 
 @dataclass(frozen=True)
@@ -227,7 +238,7 @@ class SQLServerDataSource:
              = incentivo_titulos.titulo_incentivo COLLATE SQL_Latin1_General_CP1_CI_AS
         ORDER BY incentivo_titulos.chassi, incentivo_titulos.titulo_incentivo
         """
-        return pd.read_sql(sql, self.conn)
+        return _read_sql(sql, self.conn)
 
     def extract_incentive_summary_by_chassi(self) -> pd.DataFrame:
         """Extract one incentive row per chassis with distinct titles and total balance."""
@@ -282,7 +293,7 @@ class SQLServerDataSource:
         FROM incentivo_com_saldo
         GROUP BY chassi
         """
-        return pd.read_sql(sql, self.conn)
+        return _read_sql(sql, self.conn)
 
     def extract_machine_source_audit(
         self,
@@ -330,7 +341,7 @@ class SQLServerDataSource:
             SUM(COALESCE(receita_bruta, 0.0)) AS [Receita Bruta SQL]
         FROM origem
         """
-        return pd.read_sql(
+        return _read_sql(
             sql,
             self.conn,
             params=(start_date, end_date, start_date, end_date),
@@ -408,7 +419,7 @@ class SQLServerDataSource:
             ON incentivo_titulos.chassi COLLATE SQL_Latin1_General_CP1_CI_AS
              = b.chassi COLLATE SQL_Latin1_General_CP1_CI_AS
         """
-        return pd.read_sql(
+        return _read_sql(
             sql,
             self.conn,
             params=(start_date, end_date, start_date, end_date),
@@ -598,7 +609,7 @@ class SQLServerDataSource:
             base.nro_documento,
             base.tipo
         """
-        return pd.read_sql(
+        return _read_sql(
             sql,
             self.conn,
             params=(start_date, end_date, start_date, end_date),

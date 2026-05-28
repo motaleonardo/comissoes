@@ -72,3 +72,18 @@ Tabelas criadas pelo sistema:
 - `comissoespagas`
 - `comissao_faturamento_modelo`
 - `comissao_margem_modelo`
+
+## Envio de relatorios por e-mail
+
+O envio usa Microsoft Graph API com OAuth2 client credentials. Peca ao TI para registrar um aplicativo no Microsoft Entra ID com permissao Microsoft Graph `Mail.Send` do tipo **Application** e consentimento de administrador.
+
+Configure no `.env`:
+
+```env
+GRAPH_TENANT_ID=<tenant_id>
+GRAPH_CLIENT_ID=<application_client_id>
+GRAPH_CLIENT_SECRET=<client_secret>
+GRAPH_SENDER_EMAIL=leonardo.mota@grupoluizhohl.com.br
+REPORT_EMAIL_TEST_RECIPIENT=leonardo.mota@grupoluizhohl.com.br
+REPORT_EMAIL_PRODUCTION_CC=suelen.santana@grupoluizhohl.com.br
+```

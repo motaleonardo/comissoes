@@ -1,0 +1,30 @@
+﻿id,filial,gerente,cod_vendedor,vendedor,email,email_gerente,ativo,updated_at,gerente_key
+136,Loja Vianopolis,Clayton Monteiro de Castro Filho,000022,DJALMA RODRIGUES DE PAULA JUNIOR,djalma.junior@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,clayton monteiro de castro filho
+133,Loja Vianopolis,Clayton Monteiro de Castro Filho,00040,CRAUS ROBERT DE FREITAS MARQUES,craus.robert@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,clayton monteiro de castro filho
+149,,Clayton Monteiro de Castro Filho,00248,CLAYTON MONTEIRO DE CASTRO FILHO,,,True,2026-04-24 10:00:21.990025+00:00,clayton monteiro de castro filho
+132,Loja Vianopolis,Clayton Monteiro de Castro Filho,AAETBU,ABNER SAMUEL FERREIRA COSTA,abner.costa@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,clayton monteiro de castro filho
+135,Loja Vianopolis,Clayton Monteiro de Castro Filho,AAETIO,FLAVIO OLIVEIRA SATIL,flavio.satil@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,clayton monteiro de castro filho
+134,Loja Vianopolis,Clayton Monteiro de Castro Filho,AAETM9,MARCUS RODOLFO DE AZEVEDO SOUZA,marcus.souza@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,clayton monteiro de castro filho
+140,Loja Itaberai,Hernane Borges da Costa,000666,MARCELO DE LIMA PEREIRA,marcelo.lima@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,hernane borges da costa
+141,Loja Itaberai,Hernane Borges da Costa,580,SIDNEY PEREIRA DE ARAUJO,sidney.araujo@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,hernane borges da costa
+139,Loja Itaberai,Hernane Borges da Costa,614,WEBERSON MONTEIRO,beto.monteiro@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,hernane borges da costa
+123,Loja Goiania,Hernane Borges da Costa,A0000E,MARCIO JOSE LOUREDO DE BESSA,marcio.bessa@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,hernane borges da costa
+146,,Hernane Borges da Costa,A0000H,HERNANE BORGES DA COSTA,,,True,2026-04-24 10:00:21.990025+00:00,hernane borges da costa
+125,Loja Jussara,Hernane Borges da Costa,AAEG91,WELLINGTON DO VALE RIBEIRO,wellington.ribeiro@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,hernane borges da costa
+124,Loja Goiania,Hernane Borges da Costa,AAETBL,MARIA JULIA RAMOS GERMANO,maria.germano@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,hernane borges da costa
+150,,Raphael Antonio Rabelo de Medeiros,000500,RAPHAEL ANTONIO RABELO DE MEDEIROS,,,True,2026-04-24 10:00:21.990025+00:00,raphael antonio rabelo de medeiros
+138,Loja Piranhas,Raphael Antonio Rabelo de Medeiros,AAETCY,SAMARA GONÇALVES SILVA,samara.silva@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,raphael antonio rabelo de medeiros
+137,Loja Piranhas,Raphael Antonio Rabelo de Medeiros,AAETIT,LEONARDO MATHEUS ROCHA SANTOS,leonardo.rocha@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,raphael antonio rabelo de medeiros
+147,,Reginaldo Pereira Garcia,00042,REGINALDO PEREIRA GARCIA,,,True,2026-04-24 10:00:21.990025+00:00,reginaldo pereira garcia
+128,Loja Acreuna,Reginaldo Pereira Garcia,00188,VAUVERNAGUES MORAES DE OLIVEIRA,naguinho@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,reginaldo pereira garcia
+127,Loja Acreuna,Reginaldo Pereira Garcia,00528,LUCAS RODRIGUES DE OLIVEIRA,lucas.rodrigues@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,reginaldo pereira garcia
+126,Loja Acreuna,Reginaldo Pereira Garcia,A87342,DAVI SILVA PORTO DIAS,davi.dias@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,reginaldo pereira garcia
+129,Loja Uruacu,Roberto Ferreira da Cunha,00145,FERNANDO WILLER ALVES DE CASTRO,fernando@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,roberto ferreira da cunha
+148,,Roberto Ferreira da Cunha,00487,ROBERTO FERREIRA DA CUNHA,,,True,2026-04-24 10:00:21.990025+00:00,roberto ferreira da cunha
+131,Loja Uruacu,Roberto Ferreira da Cunha,A33362,NATIELE CAROLINE OLIVEIRA,,,True,2026-04-24 10:00:21.990025+00:00,roberto ferreira da cunha
+143,Loja Nova Crixas,Roberto Ferreira da Cunha,A69853,FABIO MEIRELES BUENO,fabio.bueno@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,roberto ferreira da cunha
+142,Loja Nova Crixas,Roberto Ferreira da Cunha,AAETCP,CAIO FABIO DE SOUZA CARDOSO,caio.cardoso@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,roberto ferreira da cunha
+130,Loja Uruacu,Roberto Ferreira da Cunha,AAETM6,GUSTAVO AFRA BORGES,gustavo.borges@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,roberto ferreira da cunha
+144,Key Account,Saul Rabelo Oliveira,AAETE6,FABIO XAVIER DE SOUSA,fabio.xavier@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,saul rabelo oliveira
+145,Key Account,Saul Rabelo Oliveira,AAETFC,HELVIO SORIANO DA COSTA MENDES,helvio.mendes@hohl.com.br,,True,2026-04-24 10:00:21.990025+00:00,saul rabelo oliveira
+151,,Saul Rabelo Oliveira,AAETMU,SAUL RABELO OLIVEIRA,,,True,2026-04-24 10:00:21.990025+00:00,saul rabelo oliveira
