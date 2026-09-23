@@ -121,8 +121,29 @@ def build_report_email_plan(
         raise ValueError("mode must be 'test' or 'production'")
 
     relations = manager_relations.copy() if manager_relations is not None else pd.DataFrame()
-    has_cen_reports = bool(cen_analytic_reports)
     has_coordinator_reports = coordinator_report_df is not None or coordinator_analytic_df is not None
+
+    consorcio_lookup = {
+        _normalize_code(code): df
+        for code, df in (consorcio_by_cod_vendedor or {}).items()
+        if df is not None and not df.empty
+    }
+    reported_codes = {_normalize_code(cod_vendedor) for _, cod_vendedor, _ in cen_analytic_reports}
+    consorcio_only_entries: list[tuple[str, str, pd.DataFrame]] = []
+    for cod_vendedor, consorcio_df in consorcio_lookup.items():
+        if cod_vendedor in reported_codes:
+            continue
+        cen_display_candidates = (
+            consorcio_df.get("CEN", pd.Series(dtype=object)).fillna("").astype(str).str.strip()
+        )
+        cen_name = next((value for value in cen_display_candidates if value), "") or cod_vendedor or "(sem nome)"
+        consorcio_only_entries.append((cen_name, cod_vendedor, pd.DataFrame()))
+
+    # Every CEN with a consortium payout must go through the plan below, even when it
+    # had zero machine commission this period — otherwise it silently disappears from
+    # both the e-mail plan and, unlike every other exclusion path, from `issues` too.
+    all_cen_entries = list(cen_analytic_reports) + consorcio_only_entries
+    has_cen_reports = bool(all_cen_entries)
 
     relation_by_code = {}
     if not relations.empty:
@@ -145,13 +166,13 @@ def build_report_email_plan(
     manager_consorcio: dict[tuple[str, str], list[pd.DataFrame]] = {}
     if relations.empty and has_cen_reports:
         issues.append("Tabela comissao_gerente_vendedor vazia.")
-        cen_analytic_reports = []
+        all_cen_entries = []
 
     if mode == "test" and not _clean_email(test_recipient):
         issues.append("Configure REPORT_EMAIL_TEST_RECIPIENT para usar o modo teste.")
         return ReportEmailPlan(jobs=[], issues=issues)
 
-    for cen_name, cod_vendedor, df in cen_analytic_reports:
+    for cen_name, cod_vendedor, df in all_cen_entries:
         report = CENEmailReport(
             cen_name=_normalize_text(cen_name) or "(sem nome)",
             cod_vendedor=_normalize_code(cod_vendedor),
@@ -167,7 +188,7 @@ def build_report_email_plan(
         manager_name = relation.get("__gerente", "")
         is_manager_own_cen = bool(relation.get("__is_manager_own_cen", False))
 
-        consorcio_df = (consorcio_by_cod_vendedor or {}).get(report.cod_vendedor)
+        consorcio_df = consorcio_lookup.get(report.cod_vendedor)
         cen_attachments = (
             [("Consórcio", consorcio_df)] if consorcio_df is not None and not consorcio_df.empty else []
         )

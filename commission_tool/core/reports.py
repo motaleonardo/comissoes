@@ -249,6 +249,41 @@ def _apply_consorcio_to_cen_report(report: pd.DataFrame, consorcio: pd.DataFrame
     return report
 
 
+def _consorcio_pending_rows(
+    consorcio: pd.DataFrame,
+    valid_codes: set[str],
+    pending_columns: list[str],
+) -> pd.DataFrame:
+    """Consortium cotas paid to a cod_vendedor with no active CEN x Gerente relation.
+
+    ``_apply_consorcio_to_cen_report`` only merges consortium commission onto CENs
+    that exist in ``report_base`` (i.e. have an active relation); anything else is
+    silently dropped from the "Consórcio" column. This surfaces those rows as a
+    pendência instead, mirroring the machine-commission pendência block.
+    """
+    if consorcio.empty:
+        return pd.DataFrame(columns=pending_columns)
+
+    unmatched = consorcio.loc[~consorcio["__cod_vendedor"].isin(valid_codes)].copy()
+    if unmatched.empty:
+        return pd.DataFrame(columns=pending_columns)
+
+    unmatched["Pendência"] = "Cod_vendedor de consórcio sem relação CEN x Gerente"
+    unmatched = unmatched.rename(
+        columns={
+            "cod_vendedor": "Cod Vendedor",
+            "cen": "CEN",
+        }
+    )
+    unmatched["Valor Comissão Total"] = pd.to_numeric(
+        unmatched.get("valor_comissao_cen"), errors="coerce"
+    ).fillna(0.0)
+    for column in pending_columns:
+        if column not in unmatched.columns:
+            unmatched[column] = None
+    return unmatched[pending_columns].reset_index(drop=True)
+
+
 def build_cen_report(
     paid_commissions: pd.DataFrame | None,
     manager_relations: pd.DataFrame | None,
@@ -285,8 +320,10 @@ def build_cen_report(
     relations = relations[relations["__vendedor"].ne(relations["__gerente"])].copy()
     relations = relations.drop_duplicates(subset=["__cod_vendedor"], keep="first")
     report_base = relations[["__cod_vendedor", "__vendedor_display"]].rename(columns={"__vendedor_display": "CEN"}).copy()
+    valid_codes = set(report_base["__cod_vendedor"].tolist())
 
     consorcio = _prepare_consorcio_for_period(consorcio_paid, period_label)
+    consorcio_pending = _consorcio_pending_rows(consorcio, valid_codes, pending_columns)
 
     paid = _prepare_paid_commissions_for_period(paid_commissions, period_label)
     if paid.empty:
@@ -297,9 +334,8 @@ def build_cen_report(
             report[column] = 0.0
         report["Valor Comissão Total"] = 0.0
         report = _apply_consorcio_to_cen_report(report, consorcio)
-        return report[report_columns], pd.DataFrame(columns=pending_columns)
+        return report[report_columns], consorcio_pending
 
-    valid_codes = set(report_base["__cod_vendedor"].tolist())
     pending_mask = paid["__cod_vendedor"].eq("") | ~paid["__cod_vendedor"].isin(valid_codes)
     pending = paid.loc[pending_mask].copy()
     pending["Pendência"] = pending["__cod_vendedor"].apply(
@@ -324,6 +360,7 @@ def build_cen_report(
         pending = pending[pending_columns].reset_index(drop=True)
     else:
         pending = pd.DataFrame(columns=pending_columns)
+    pending = pd.concat([pending, consorcio_pending], ignore_index=True)[pending_columns]
 
     paid = paid.loc[~pending_mask].copy()
     if paid.empty:

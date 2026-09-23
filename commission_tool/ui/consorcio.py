@@ -13,6 +13,7 @@ from commission_tool.core.consorcio import (
     enrich_consorcio_rows,
     suggest_cod_vendedor,
 )
+from commission_tool.core.periods import CommissionPeriod, build_period_options, default_base_period
 from commission_tool.data.sources.postgres import read_manager_relations
 from commission_tool.data.sources.postgres_consorcio import (
     ensure_consorcio_tables,
@@ -40,6 +41,18 @@ VENDEDOR_EDITOR_COLUMNS = [
     "sugestao_cod_vendedor",
     "sugestao_cen",
 ]
+
+
+def consorcio_period_label(period: CommissionPeriod) -> str:
+    """Return the commission period label used to save and read consortium data.
+
+    This must always match ``build_commission_period(...).label`` (e.g. "Agosto/2026"),
+    the same format used by every other report and email in the app. Never build a
+    synthetic label such as "08/2026" here — it would be written to
+    ``comissoes_consorcio_pagas.mes_ano_comissao`` but never matched by the reports
+    or e-mail plan that read it back by ``period_label``.
+    """
+    return period.label
 
 
 def prepare_pdv_editor_df(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -139,10 +152,15 @@ def render_consorcio_apuracao() -> None:
     ensure_consorcio_tables()
 
     hoje = date.today()
-    col_ano, col_mes = st.columns(2)
-    ano = col_ano.number_input("Ano da competência", min_value=2020, max_value=2100, value=hoje.year, step=1)
-    mes = col_mes.number_input("Mês da competência", min_value=1, max_value=12, value=hoje.month, step=1)
-    period_label = f"{int(mes):02d}/{int(ano)}"
+    periods = build_period_options(hoje, years_back=1, years_ahead=1)
+    labels = [period.label for period in periods]
+    default_label = default_base_period(hoje).label
+    default_index = labels.index(default_label) if default_label in labels else 0
+    selected_label = st.selectbox("Competência", options=labels, index=default_index, key="consorcio_periodo")
+    selected_period = periods[labels.index(selected_label)]
+    period_label = consorcio_period_label(selected_period)
+    ano = selected_period.base_year
+    mes = selected_period.base_month
 
     uploads = st.file_uploader(
         "Relatórios do sistema de consórcio (um CSV por loja)",

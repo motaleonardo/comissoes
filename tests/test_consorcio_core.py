@@ -131,15 +131,26 @@ class EnrichTests(unittest.TestCase):
 
         self.assertEqual(result.loc[0, "status"], STATUS_BLOQUEADO_GERENTE)
 
-    def test_first_installment_does_not_require_manager(self):
+    def test_first_installment_also_requires_manager(self):
+        """Parcela 001/003 pays the CEN directly; without a manager relation it must
+        not be gravável — otherwise the cota is marked paid and locked forever while
+        the CEN never receives (regression for C2)."""
         result = _enrich([_row(cd_vendedor_consorcio="002356", nm_vendedor_consorcio="VENDEDOR C")])
 
-        self.assertEqual(result.loc[0, "status"], STATUS_APTO)
+        self.assertEqual(result.loc[0, "status"], STATUS_BLOQUEADO_GERENTE)
+        self.assertFalse(result.loc[0, "apto"])
+
+    def test_cen_fallback_to_seller_name_was_removed(self):
+        """cen must never be filled from nm_vendedor_consorcio: that fallback hid rows
+        with no manager relation behind a plausible-looking, but unpayable, CEN name."""
+        result = _enrich([_row(cd_vendedor_consorcio="002356", nm_vendedor_consorcio="VENDEDOR C")])
+
+        self.assertEqual(result.loc[0, "cen"], "")
 
     def test_blocks_already_paid_cota(self):
-        result = _enrich([_row()], paid_keys={"002362||0025||00||001 / 003": "08/2026"})
+        result = _enrich([_row()], paid_keys={"002362||0025||00||001 / 003": "Agosto/2026"})
 
-        self.assertEqual(result.loc[0, "status"], STATUS_BLOQUEADO_JA_PAGO.format(competencia="08/2026"))
+        self.assertEqual(result.loc[0, "status"], STATUS_BLOQUEADO_JA_PAGO.format(competencia="Agosto/2026"))
 
     def test_blocks_duplicate_inside_upload(self):
         result = _enrich([_row(arquivo_origem="A.csv"), _row(arquivo_origem="B.csv")])
@@ -229,7 +240,7 @@ class ConsorcioAnalyticReportTests(unittest.TestCase):
                     "valor_comissao_coordenador": 0.0,
                     "competencia_ano": 2026,
                     "competencia_mes": 9,
-                    "mes_ano_comissao": "09/2026",
+                    "mes_ano_comissao": "Setembro/2026",
                 }
             ]
         )
@@ -264,7 +275,7 @@ class ConsorcioAnalyticReportTests(unittest.TestCase):
                     "cd_pdv": "208016",
                     "competencia_ano": 2026,
                     "competencia_mes": 9,
-                    "mes_ano_comissao": "09/2026",
+                    "mes_ano_comissao": "Setembro/2026",
                     "filial": "Loja Acreuna",
                     "cen": "VENDEDOR A",
                 }

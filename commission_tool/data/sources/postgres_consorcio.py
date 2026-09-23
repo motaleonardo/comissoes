@@ -298,9 +298,18 @@ def replace_active_consorcio_regras(df: pd.DataFrame) -> int:
 
 
 def read_consorcio_coordenador() -> dict:
+    """Return the active consortium coordinator, or an empty dict when there is none.
+
+    ``DEFAULT_COORDENADOR`` is only the initial seed row created by
+    ``ensure_consorcio_tables``. It must never be returned here as a fallback: if the
+    active row is ever deactivated (coordinator changed), silently falling back to the
+    hardcoded name would route the e-mail to the wrong, previous person instead of
+    failing safely. ``build_report_email_plan`` already turns a missing e-mail into an
+    ``issue`` instead of skipping silently.
+    """
     rows = _read_active(CONSORCIO_COORDENADOR_TABLE, ["nome", "email"])
     if rows.empty:
-        return dict(DEFAULT_COORDENADOR)
+        return {"nome": "", "email": ""}
     return {"nome": str(rows.loc[0, "nome"] or ""), "email": str(rows.loc[0, "email"] or "")}
 
 

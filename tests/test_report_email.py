@@ -211,7 +211,7 @@ class ReportEmailPlanTests(unittest.TestCase):
         plan = build_report_email_plan(
             [("ABNER SAMUEL FERREIRA COSTA", "AAETBU", pd.DataFrame([{"Nro Documento": "1"}]))],
             self.relations,
-            "09/2026",
+            "Setembro/2026",
             mode="test",
             test_recipient="teste@hohl.com.br",
             production_cc="",
@@ -221,11 +221,77 @@ class ReportEmailPlanTests(unittest.TestCase):
         cen_job = next(job for job in plan.jobs if job.kind == "cen")
         self.assertIn("Consórcio", [name for name, _ in cen_job.attachments])
 
+    def test_cen_with_only_consorcio_still_gets_an_email_job(self):
+        """Regression for I1: build_cen_analytic_reports never lists a CEN whose
+        machine commission is zero, so a CEN who only sold consórcio this period was
+        silently missing from the plan and from `issues`."""
+        consorcio = {
+            "AAETBU": pd.DataFrame([{"CEN": "ABNER SAMUEL FERREIRA COSTA", "Cota": "0025", "Valor": 1680.0}])
+        }
+
+        plan = build_report_email_plan(
+            [],
+            self.relations,
+            "Setembro/2026",
+            mode="production",
+            test_recipient="leonardo@example.com",
+            production_cc="suelen@example.com",
+            consorcio_by_cod_vendedor=consorcio,
+        )
+
+        self.assertEqual(plan.issues, [])
+        cen_jobs = [job for job in plan.jobs if job.kind == "cen"]
+        self.assertEqual(len(cen_jobs), 1)
+        self.assertEqual(cen_jobs[0].to, "abner@example.com")
+        self.assertIn("Consórcio", [name for name, _ in cen_jobs[0].attachments])
+
+    def test_cen_with_only_consorcio_and_no_relation_raises_issue_instead_of_vanishing(self):
+        consorcio = {"UNKNOWNCOD": pd.DataFrame([{"CEN": "SEM RELACAO", "Cota": "0025", "Valor": 1680.0}])}
+
+        plan = build_report_email_plan(
+            [],
+            self.relations,
+            "Setembro/2026",
+            mode="production",
+            test_recipient="leonardo@example.com",
+            production_cc="suelen@example.com",
+            consorcio_by_cod_vendedor=consorcio,
+        )
+
+        self.assertEqual(len(plan.jobs), 0)
+        self.assertTrue(
+            any("UNKNOWNCOD" in issue and "sem relação" in issue for issue in plan.issues),
+            plan.issues,
+        )
+
+    def test_manager_gets_consorcio_attachment_for_cen_without_machine_report(self):
+        """Regression for I2: the manager report's "Gestor Consórcio" total sums every
+        consortium row for that manager, but the e-mail attachment used to be built
+        only from CENs that also had a machine-commission report."""
+        consorcio = {
+            "AAETBU": pd.DataFrame([{"CEN": "ABNER SAMUEL FERREIRA COSTA", "Cota": "0025", "Valor": 1680.0}])
+        }
+
+        plan = build_report_email_plan(
+            [],
+            self.relations,
+            "Setembro/2026",
+            mode="production",
+            test_recipient="leonardo@example.com",
+            production_cc="suelen@example.com",
+            consorcio_by_cod_vendedor=consorcio,
+        )
+
+        manager_job = next(job for job in plan.jobs if job.kind == "manager")
+        self.assertEqual(manager_job.to, "gerente@example.com")
+        consorcio_attachment = next(df for name, df in manager_job.attachments if name == "Consórcio")
+        self.assertEqual(consorcio_attachment["CEN"].tolist(), ["ABNER SAMUEL FERREIRA COSTA"])
+
     def test_consorcio_coordinator_gets_its_own_job(self):
         plan = build_report_email_plan(
             [],
             self.relations,
-            "09/2026",
+            "Setembro/2026",
             mode="production",
             test_recipient="",
             production_cc="",

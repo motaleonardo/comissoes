@@ -2,7 +2,12 @@ import unittest
 
 import pandas as pd
 
-from commission_tool.ui.consorcio import prepare_pdv_editor_df, prepare_vendedor_editor_df
+from commission_tool.core.periods import build_commission_period
+from commission_tool.ui.consorcio import (
+    consorcio_period_label,
+    prepare_pdv_editor_df,
+    prepare_vendedor_editor_df,
+)
 
 
 class ConsorcioEditorTests(unittest.TestCase):
@@ -37,3 +42,17 @@ class ConsorcioEditorTests(unittest.TestCase):
                 "sugestao_cen",
             ],
         )
+
+
+class ConsorcioPeriodLabelTests(unittest.TestCase):
+    def test_consorcio_period_label_matches_build_commission_period_format(self):
+        """Regression for C1: the consortium apuração screen used to build its own
+        "MM/YYYY" label (e.g. "08/2026") instead of the app-wide period label
+        (e.g. "Agosto/2026"), so the read side (reports, e-mails) never matched what
+        was written to comissoes_consorcio_pagas.mes_ano_comissao."""
+        period = build_commission_period(2026, 7)
+
+        self.assertEqual(period.label, "Agosto/2026")
+        self.assertEqual(consorcio_period_label(period), period.label)
+        self.assertNotEqual(consorcio_period_label(period), "07/2026")
+        self.assertNotEqual(consorcio_period_label(period), "08/2026")

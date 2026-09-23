@@ -7,10 +7,12 @@ from commission_tool.data.sources.postgres_consorcio import (
     CONSORCIO_PAID_TABLE,
     CONSORCIO_PDV_TABLE,
     CONSORCIO_VENDEDOR_TABLE,
+    DEFAULT_COORDENADOR,
     _prepare_consorcio_paid,
     _prepare_consorcio_regras,
     _prepare_pdv_map,
     _prepare_vendedor_map,
+    read_consorcio_coordenador,
     read_consorcio_paid_keys,
     register_missing_consorcio_vendedores,
 )
@@ -109,6 +111,31 @@ class PrepareRegrasTests(unittest.TestCase):
         self.assertEqual(prepared["percentual_cen"].tolist(), [0.84])
 
 
+class CoordenadorFailSafeTests(unittest.TestCase):
+    def test_returns_empty_dict_when_no_active_row_instead_of_hardcoded_default(self):
+        """Regression for the Minor finding: DEFAULT_COORDENADOR must only seed the
+        table on first run (ensure_consorcio_tables). If the active row is ever
+        deactivated, read_consorcio_coordenador must fail safe (empty), not silently
+        keep routing e-mails to the old hardcoded coordinator."""
+        with patch(
+            "commission_tool.data.sources.postgres_consorcio._read_active",
+            return_value=pd.DataFrame(columns=["nome", "email"]),
+        ):
+            coordenador = read_consorcio_coordenador()
+
+        self.assertEqual(coordenador, {"nome": "", "email": ""})
+        self.assertNotEqual(coordenador, DEFAULT_COORDENADOR)
+
+    def test_returns_active_row_when_present(self):
+        with patch(
+            "commission_tool.data.sources.postgres_consorcio._read_active",
+            return_value=pd.DataFrame([{"nome": "NOVO COORDENADOR", "email": "novo@hohl.com.br"}]),
+        ):
+            coordenador = read_consorcio_coordenador()
+
+        self.assertEqual(coordenador, {"nome": "NOVO COORDENADOR", "email": "novo@hohl.com.br"})
+
+
 class RegisterMissingTests(unittest.TestCase):
     def test_registers_only_unknown_sellers_with_blank_cod_vendedor(self):
         conn = FakeConnection()
@@ -188,10 +215,10 @@ class PreparePaidTests(unittest.TestCase):
             ]
         )
 
-        prepared = _prepare_consorcio_paid(df, 2026, 9, "09/2026")
+        prepared = _prepare_consorcio_paid(df, 2026, 9, "Setembro/2026")
 
         self.assertEqual(len(prepared), 1)
-        self.assertEqual(prepared.loc[0, "mes_ano_comissao"], "09/2026")
+        self.assertEqual(prepared.loc[0, "mes_ano_comissao"], "Setembro/2026")
         self.assertEqual(prepared.loc[0, "competencia_ano"], 2026)
         self.assertEqual(prepared.loc[0, "competencia_mes"], 9)
         self.assertEqual(str(prepared.loc[0, "dt_alocacao"]), "2026-07-21")
@@ -212,7 +239,7 @@ class PreparePaidTests(unittest.TestCase):
             ]
         )
 
-        prepared = _prepare_consorcio_paid(df, 2026, 9, "09/2026")
+        prepared = _prepare_consorcio_paid(df, 2026, 9, "Setembro/2026")
 
         self.assertEqual(len(prepared), 0)
 
@@ -229,7 +256,7 @@ class PreparePaidTests(unittest.TestCase):
             ]
         )
 
-        prepared = _prepare_consorcio_paid(df, 2026, 9, "09/2026")
+        prepared = _prepare_consorcio_paid(df, 2026, 9, "Setembro/2026")
 
         self.assertEqual(len(prepared), 1)
         self.assertIsNone(prepared.loc[0, "dt_alocacao"])
@@ -247,14 +274,14 @@ class PreparePaidTests(unittest.TestCase):
                         "cd_cota": "0025",
                         "versao": "00",
                         "parcela": "001 / 003",
-                        "mes_ano_comissao": "08/2026",
+                        "mes_ano_comissao": "Agosto/2026",
                     },
                     {
                         "cd_grupo": "002362",
                         "cd_cota": "0026",
                         "versao": "00",
                         "parcela": "001  /\t003",
-                        "mes_ano_comissao": "08/2026",
+                        "mes_ano_comissao": "Agosto/2026",
                     },
                 ]
             ),
@@ -265,8 +292,8 @@ class PreparePaidTests(unittest.TestCase):
         self.assertEqual(
             keys,
             {
-                "002362||0025||00||001 / 003": "08/2026",
-                "002362||0026||00||001 / 003": "08/2026",
+                "002362||0025||00||001 / 003": "Agosto/2026",
+                "002362||0026||00||001 / 003": "Agosto/2026",
             },
         )
 

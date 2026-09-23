@@ -114,7 +114,6 @@ def enrich_consorcio_rows(
         cen_lookup = dict(zip(relations["__cod"], relations["vendedor"].fillna("").astype(str).str.strip()))
         gerente_lookup = dict(zip(relations["__cod"], relations["gerente"].fillna("").astype(str).str.strip()))
     result["cen"] = result["cod_vendedor"].map(cen_lookup).fillna("")
-    result["cen"] = result["cen"].mask(result["cen"].eq(""), result["nm_vendedor_consorcio"])
     result["gerente"] = result["cod_vendedor"].map(gerente_lookup).fillna("")
     result["coordenador"] = str(coordenador.get("nome", "") or "")
 
@@ -149,7 +148,6 @@ def enrich_consorcio_rows(
         | result["percentual_gestor"].gt(0)
         | result["percentual_coordenador"].gt(0)
     )
-    result["__paga_gestor"] = result["percentual_gestor"].gt(0) | result["percentual_coordenador"].gt(0)
     result["__duplicado"] = result.duplicated(subset=["__cota_key"], keep="first")
     paid_keys = paid_keys or {}
     result["__ja_pago"] = result["__cota_key"].map(paid_keys)
@@ -167,7 +165,7 @@ def enrich_consorcio_rows(
             return STATUS_BLOQUEADO_PDV
         if not row["cod_vendedor"]:
             return STATUS_BLOQUEADO_VENDEDOR
-        if row["__paga_gestor"] and not row["gerente"]:
+        if row["__paga_alguem"] and not row["gerente"]:
             return STATUS_BLOQUEADO_GERENTE
         if not row["__paga_alguem"]:
             return STATUS_SEM_COMISSAO
@@ -187,7 +185,6 @@ def enrich_consorcio_rows(
             "__tem_regra",
             "__valor_invalido",
             "__paga_alguem",
-            "__paga_gestor",
             "__duplicado",
             "__ja_pago",
         ]
