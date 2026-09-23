@@ -5,6 +5,7 @@ import pandas as pd
 from commission_tool.core.reports import (
     build_cen_analytic_reports,
     build_cen_report,
+    build_consorcio_coordinator_report,
     build_filial_analytic_reports,
     build_manager_report,
     build_used_implements_analytic_report,
@@ -720,6 +721,99 @@ class ReportsTests(unittest.TestCase):
         self.assertEqual(analytic_df.loc[0, "Tipo"], "Faturamento")
         self.assertIn("Data de Emissão", analytic_df.columns)
         self.assertEqual(analytic_df.loc[0, "Data de Emissão"], "10/04/2026")
+
+
+CONSORCIO_PAID = pd.DataFrame(
+    [
+        {
+            "mes_ano_comissao": "09/2026",
+            "cod_vendedor": "00188",
+            "cen": "VENDEDOR A",
+            "filial": "Loja Acreuna",
+            "gerente": "Reginaldo Pereira Garcia",
+            "coordenador": "DJALMA RODRIGUES DE PAULA JUNIOR",
+            "vl_bem": 200000.0,
+            "valor_comissao_cen": 1680.0,
+            "valor_comissao_gestor": 0.0,
+            "valor_comissao_coordenador": 0.0,
+        },
+        {
+            "mes_ano_comissao": "09/2026",
+            "cod_vendedor": "00188",
+            "cen": "VENDEDOR A",
+            "filial": "Loja Acreuna",
+            "gerente": "Reginaldo Pereira Garcia",
+            "coordenador": "DJALMA RODRIGUES DE PAULA JUNIOR",
+            "vl_bem": 206994.15,
+            "valor_comissao_cen": 0.0,
+            "valor_comissao_gestor": 434.687715,
+            "valor_comissao_coordenador": 310.491225,
+        },
+        {
+            "mes_ano_comissao": "08/2026",
+            "cod_vendedor": "00188",
+            "cen": "VENDEDOR A",
+            "filial": "Loja Acreuna",
+            "gerente": "Reginaldo Pereira Garcia",
+            "coordenador": "DJALMA RODRIGUES DE PAULA JUNIOR",
+            "vl_bem": 100000.0,
+            "valor_comissao_cen": 840.0,
+            "valor_comissao_gestor": 0.0,
+            "valor_comissao_coordenador": 0.0,
+        },
+    ]
+)
+
+
+class ConsorcioInReportsTests(unittest.TestCase):
+    def test_cen_report_has_consorcio_column_for_the_period(self):
+        relations = pd.DataFrame(
+            [{"cod_vendedor": "00188", "vendedor": "VENDEDOR A", "gerente": "Reginaldo Pereira Garcia"}]
+        )
+
+        report, _ = build_cen_report(
+            pd.DataFrame(),
+            relations,
+            "09/2026",
+            consorcio_paid=CONSORCIO_PAID,
+        )
+
+        row = report.loc[report["CEN"] == "VENDEDOR A"].iloc[0]
+        self.assertAlmostEqual(row["Consórcio"], 1680.0, places=2)
+        self.assertAlmostEqual(row["Valor Comissão Total"], 1680.0, places=2)
+
+    def test_manager_report_adds_consorcio_outside_the_33_percent(self):
+        paid = pd.DataFrame(
+            [
+                {
+                    "mes_ano_comissao": "09/2026",
+                    "gerente": "Reginaldo Pereira Garcia",
+                    "cod_vendedor": "00188",
+                    "cen": "VENDEDOR A",
+                    "filial": "Loja Acreuna",
+                    "classificacao_venda": "Venda Direta",
+                    "receita_bruta": 100000.0,
+                    "receita_bruta_incentivos_rs": 100000.0,
+                    "margem_incentivos_rs": 10000.0,
+                    "perc_margem_bruta": 10.0,
+                    "valor_comissao_fat": 6000.0,
+                    "valor_comissao_margem": 0.0,
+                    "valor_comissao_total": 6000.0,
+                }
+            ]
+        )
+
+        report = build_manager_report(paid, None, "09/2026", consorcio_paid=CONSORCIO_PAID)
+
+        row = report.iloc[0]
+        self.assertAlmostEqual(row["Gestor Consórcio"], 434.687715, places=6)
+        self.assertAlmostEqual(row["Comissão Gerente"], 6000.0 * 0.33 + 434.687715, places=6)
+
+    def test_coordinator_report_sums_only_the_period(self):
+        report = build_consorcio_coordinator_report(CONSORCIO_PAID, "09/2026")
+
+        self.assertEqual(report.loc[0, "Nome"], "DJALMA RODRIGUES DE PAULA JUNIOR")
+        self.assertAlmostEqual(report.loc[0, "Valor Comissão"], 310.491225, places=6)
 
 
 if __name__ == "__main__":

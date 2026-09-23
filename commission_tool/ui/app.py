@@ -34,6 +34,7 @@ from commission_tool.core.periods import MONTH_NAMES_PT, build_period_options, d
 from commission_tool.core.reports import (
     build_cen_analytic_reports,
     build_cen_report,
+    build_consorcio_coordinator_report,
     build_filial_analytic_reports,
     build_manager_report,
     build_used_implements_analytic_report,
@@ -80,7 +81,7 @@ from commission_tool.data.sources.postgres import (
     save_model_margin_rates,
     save_paid_commissions,
 )
-from commission_tool.data.sources.postgres_consorcio import ensure_consorcio_tables
+from commission_tool.data.sources.postgres_consorcio import ensure_consorcio_tables, read_consorcio_paid
 from commission_tool.data.sources.sqlserver import get_connection
 from commission_tool.io.excel import (
     build_chassis_history_workbook,
@@ -3021,18 +3022,25 @@ def render_reports_view() -> None:
         try:
             paid_commissions = read_paid_commissions_by_period_label(selected_period)
             manager_relations = read_manager_relations()
+            consorcio_paid = read_consorcio_paid(selected_period)
             cen_report_df, _ = build_cen_report(
                 paid_commissions,
                 manager_relations,
                 selected_period,
+                consorcio_paid=consorcio_paid,
             )
             manager_report_df = build_manager_report(
                 paid_commissions,
                 manager_relations,
                 selected_period,
+                consorcio_paid=consorcio_paid,
             )
             coordinator_report_df = build_used_implements_coordinator_report(
                 paid_commissions,
+                selected_period,
+            )
+            consorcio_coordinator_report_df = build_consorcio_coordinator_report(
+                consorcio_paid,
                 selected_period,
             )
             filial_analytic_reports = build_filial_analytic_reports(
@@ -3050,6 +3058,7 @@ def render_reports_view() -> None:
             st.session_state.cen_report_df = cen_report_df
             st.session_state.manager_report_df = manager_report_df
             st.session_state.coordinator_report_df = coordinator_report_df
+            st.session_state.consorcio_coordinator_report_df = consorcio_coordinator_report_df
             st.session_state.filial_analytic_reports = filial_analytic_reports
             st.session_state.used_implements_analytic_df = used_implements_analytic_df
             st.session_state.cen_analytic_reports = cen_analytic_reports
@@ -3069,6 +3078,7 @@ def render_reports_view() -> None:
     cen_report_df = st.session_state.get("cen_report_df")
     manager_report_df = st.session_state.get("manager_report_df")
     coordinator_report_df = st.session_state.get("coordinator_report_df")
+    consorcio_coordinator_report_df = st.session_state.get("consorcio_coordinator_report_df")
     filial_analytic_reports = st.session_state.get("filial_analytic_reports", [])
     used_implements_analytic_df = st.session_state.get("used_implements_analytic_df")
     cen_analytic_reports = st.session_state.get("cen_analytic_reports", [])
@@ -3079,6 +3089,7 @@ def render_reports_view() -> None:
         cen_report_df is None
         or manager_report_df is None
         or coordinator_report_df is None
+        or consorcio_coordinator_report_df is None
         or used_implements_analytic_df is None
     ):
         st.info("Selecione a competência e clique em Gerar relatórios.")
@@ -3098,6 +3109,10 @@ def render_reports_view() -> None:
         (
             f"Coordenador de Seminovos e Implementos - {report_period}",
             format_machine_display_df(coordinator_report_df),
+        ),
+        (
+            f"Coordenador de Consórcio - {report_period}",
+            format_machine_display_df(consorcio_coordinator_report_df),
         ),
     ]
     for filial, filial_df in filial_analytic_reports:
@@ -3230,6 +3245,39 @@ def render_reports_view() -> None:
     )
     st.dataframe(
         format_machine_display_df(coordinator_report_df),
+        width="stretch",
+        height=260,
+        hide_index=True,
+    )
+
+    st.markdown("### Coordenador de Consórcio")
+    total_consorcio_coordinator_revenue = pd.to_numeric(
+        consorcio_coordinator_report_df.get("Receita (VL Bem)"),
+        errors="coerce",
+    ).fillna(0).sum()
+    total_consorcio_coordinator_commission = pd.to_numeric(
+        consorcio_coordinator_report_df.get("Valor Comissão"),
+        errors="coerce",
+    ).fillna(0).sum()
+
+    consorcio_coordinator_metric_1, consorcio_coordinator_metric_2, consorcio_coordinator_metric_3 = st.columns(3)
+    consorcio_coordinator_metric_1.metric("Coordenadores no relatório", len(consorcio_coordinator_report_df))
+    consorcio_coordinator_metric_2.metric("Receita (VL Bem)", format_currency_br(total_consorcio_coordinator_revenue))
+    consorcio_coordinator_metric_3.metric("Valor Comissão", format_currency_br(total_consorcio_coordinator_commission))
+
+    consorcio_coordinator_buffer = dataframe_to_excel_download(
+        consorcio_coordinator_report_df,
+        sheet_name="Coord Consorcio",
+    )
+    st.download_button(
+        "Exportar relatório Coordenador de Consórcio em .xlsx",
+        data=consorcio_coordinator_buffer,
+        file_name=f"relatorio_coordenador_consorcio_{sanitize_download_label(report_period)}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        width="content",
+    )
+    st.dataframe(
+        format_machine_display_df(consorcio_coordinator_report_df),
         width="stretch",
         height=260,
         hide_index=True,
