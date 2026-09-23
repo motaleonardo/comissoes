@@ -6,6 +6,19 @@ from commission_tool.core.report_email import build_report_email_plan, group_man
 
 
 class ReportEmailPlanTests(unittest.TestCase):
+    def setUp(self):
+        self.relations = pd.DataFrame(
+            [
+                {
+                    "cod_vendedor": "AAETBU",
+                    "vendedor": "ABNER SAMUEL FERREIRA COSTA",
+                    "gerente": "GERENTE TESTE",
+                    "email": "abner@example.com",
+                    "email_gerente": "gerente@example.com",
+                }
+            ]
+        )
+
     def test_production_uses_cen_and_manager_emails_with_required_cc(self):
         cen_reports = [
             ("Ana CEN", "A001", pd.DataFrame({"Valor": [10]})),
@@ -183,6 +196,41 @@ class ReportEmailPlanTests(unittest.TestCase):
         self.assertEqual(plan.jobs[0].to, "wagner@hohl.com.br")
         self.assertEqual(plan.jobs[0].display_name, "Wagner Goncalves Garcia")
         self.assertEqual(len(plan.jobs[0].attachments), 2)
+
+    def test_cen_job_gets_consorcio_attachment(self):
+        consorcio = {
+            "AAETBU": pd.DataFrame([{"Cota": "0025", "Parcela": "001 / 003", "Valor": 1680.0}])
+        }
+
+        plan = build_report_email_plan(
+            [("ABNER SAMUEL FERREIRA COSTA", "AAETBU", pd.DataFrame([{"Nro Documento": "1"}]))],
+            self.relations,
+            "09/2026",
+            mode="test",
+            test_recipient="teste@hohl.com.br",
+            production_cc="",
+            consorcio_by_cod_vendedor=consorcio,
+        )
+
+        cen_job = next(job for job in plan.jobs if job.kind == "cen")
+        self.assertIn("Consórcio", [name for name, _ in cen_job.attachments])
+
+    def test_consorcio_coordinator_gets_its_own_job(self):
+        plan = build_report_email_plan(
+            [],
+            self.relations,
+            "09/2026",
+            mode="production",
+            test_recipient="",
+            production_cc="",
+            consorcio_coordinator_df=pd.DataFrame([{"Nome": "DJALMA", "Valor Comissão": 310.49}]),
+            consorcio_coordinator_email="djalma.junior@hohl.com.br",
+            consorcio_coordinator_name="DJALMA RODRIGUES DE PAULA JUNIOR",
+        )
+
+        job = next(job for job in plan.jobs if job.kind == "consorcio_coordinator")
+        self.assertEqual(job.to, "djalma.junior@hohl.com.br")
+        self.assertIn("Consórcio", job.subject)
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ class CENEmailReport:
 
 @dataclass(frozen=True)
 class ReportEmailJob:
-    kind: Literal["cen", "manager", "coordinator"]
+    kind: Literal["cen", "manager", "coordinator", "consorcio_coordinator"]
     display_name: str
     to: str
     cc: list[str]
@@ -111,6 +111,10 @@ def build_report_email_plan(
     coordinator_analytic_df: pd.DataFrame | None = None,
     coordinator_email: str = "wagner@hohl.com.br",
     coordinator_name: str = "Wagner Goncalves Garcia",
+    consorcio_by_cod_vendedor: dict[str, pd.DataFrame] | None = None,
+    consorcio_coordinator_df: pd.DataFrame | None = None,
+    consorcio_coordinator_email: str = "",
+    consorcio_coordinator_name: str = "",
 ) -> ReportEmailPlan:
     """Create one email job per CEN and one grouped job per manager."""
     if mode not in {"test", "production"}:
@@ -138,6 +142,7 @@ def build_report_email_plan(
     issues: list[str] = []
     jobs: list[ReportEmailJob] = []
     manager_reports: dict[tuple[str, str], list[CENEmailReport]] = {}
+    manager_consorcio: dict[tuple[str, str], list[pd.DataFrame]] = {}
     if relations.empty and has_cen_reports:
         issues.append("Tabela comissao_gerente_vendedor vazia.")
         cen_analytic_reports = []
@@ -162,6 +167,11 @@ def build_report_email_plan(
         manager_name = relation.get("__gerente", "")
         is_manager_own_cen = bool(relation.get("__is_manager_own_cen", False))
 
+        consorcio_df = (consorcio_by_cod_vendedor or {}).get(report.cod_vendedor)
+        cen_attachments = (
+            [("Consórcio", consorcio_df)] if consorcio_df is not None and not consorcio_df.empty else []
+        )
+
         if is_manager_own_cen:
             pass
         elif mode == "production" and not actual_cen_email:
@@ -180,6 +190,7 @@ def build_report_email_plan(
                         "Atenciosamente."
                     ),
                     reports=[report],
+                    attachments=cen_attachments,
                 )
             )
 
@@ -189,8 +200,17 @@ def build_report_email_plan(
 
         manager_key = (manager_name, _job_recipient(mode, actual_manager_email, test_recipient))
         manager_reports.setdefault(manager_key, []).append(report)
+        if cen_attachments:
+            manager_consorcio.setdefault(manager_key, []).append(consorcio_df)
 
     for (manager_name, recipient), reports in sorted(manager_reports.items(), key=lambda item: item[0][0].upper()):
+        manager_key = (manager_name, recipient)
+        manager_consorcio_frames = manager_consorcio.get(manager_key, [])
+        manager_attachments = (
+            [("Consórcio", pd.concat(manager_consorcio_frames, ignore_index=True))]
+            if manager_consorcio_frames
+            else []
+        )
         jobs.append(
             ReportEmailJob(
                 kind="manager",
@@ -204,6 +224,7 @@ def build_report_email_plan(
                     "Atenciosamente."
                 ),
                 reports=reports,
+                attachments=manager_attachments,
             )
         )
 
@@ -229,6 +250,27 @@ def build_report_email_plan(
                         ("Consolidado Implementos e Usados", coordinator_report_df if coordinator_report_df is not None else pd.DataFrame()),
                         ("Analítico Implementos e Usados", coordinator_analytic_df if coordinator_analytic_df is not None else pd.DataFrame()),
                     ],
+                )
+            )
+
+    if consorcio_coordinator_df is not None and not consorcio_coordinator_df.empty:
+        actual_email = _clean_email(consorcio_coordinator_email)
+        if mode == "production" and not actual_email:
+            issues.append(f"Coordenador de consórcio {consorcio_coordinator_name} sem e-mail.")
+        else:
+            jobs.append(
+                ReportEmailJob(
+                    kind="consorcio_coordinator",
+                    display_name=consorcio_coordinator_name or "(sem nome)",
+                    to=_job_recipient(mode, actual_email, test_recipient),
+                    cc=cc,
+                    subject=f"Premiação de Consórcio - {period_label}",
+                    body=(
+                        f"Olá,\n\nSegue em anexo a premiação de consórcio referente à "
+                        f"competência {period_label}.\n\nAtenciosamente."
+                    ),
+                    reports=[],
+                    attachments=[("Premiação Consórcio", consorcio_coordinator_df)],
                 )
             )
 

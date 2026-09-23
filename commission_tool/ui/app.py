@@ -81,7 +81,11 @@ from commission_tool.data.sources.postgres import (
     save_model_margin_rates,
     save_paid_commissions,
 )
-from commission_tool.data.sources.postgres_consorcio import ensure_consorcio_tables, read_consorcio_paid
+from commission_tool.data.sources.postgres_consorcio import (
+    ensure_consorcio_tables,
+    read_consorcio_coordenador,
+    read_consorcio_paid,
+)
 from commission_tool.data.sources.sqlserver import get_connection
 from commission_tool.io.excel import (
     build_chassis_history_workbook,
@@ -252,15 +256,20 @@ def sanitize_download_label(label: str) -> str:
     return cleaned or "periodo"
 
 
+def _extra_attachment_files(
+    job: ReportEmailJob, period_stub: str, file_stub: str
+) -> list[tuple[str, bytes]]:
+    extras: list[tuple[str, bytes]] = []
+    for label, df in job.attachments:
+        extra_stub = sanitize_download_label(label)
+        buffer = dataframe_to_excel_download(df, sheet_name=label[:31])
+        extras.append((f"{extra_stub}_{file_stub}_{period_stub}.xlsx", buffer.getvalue()))
+    return extras
+
+
 def build_report_email_attachments(job: ReportEmailJob, report_period: str) -> list[tuple[str, bytes]]:
     period_stub = sanitize_download_label(report_period)
-    if job.kind == "cen":
-        report = job.reports[0]
-        file_stub = sanitize_download_label(report.cen_name) or sanitize_download_label(report.cod_vendedor) or "cen"
-        buffer = dataframe_to_excel_download(report.df, sheet_name="Analitico CEN")
-        return [(f"analitico_cen_{file_stub}_{period_stub}.xlsx", buffer.getvalue())]
-
-    if job.kind == "coordinator":
+    if job.kind in {"coordinator", "consorcio_coordinator"}:
         attachments = []
         for label, df in job.attachments:
             file_stub = sanitize_download_label(label)
@@ -268,10 +277,22 @@ def build_report_email_attachments(job: ReportEmailJob, report_period: str) -> l
             attachments.append((f"{file_stub}_{period_stub}.xlsx", buffer.getvalue()))
         return attachments
 
+    if job.kind == "cen":
+        report = job.reports[0]
+        file_stub = sanitize_download_label(report.cen_name) or sanitize_download_label(report.cod_vendedor) or "cen"
+        buffer = dataframe_to_excel_download(report.df, sheet_name="Analitico CEN")
+        return [
+            (f"analitico_cen_{file_stub}_{period_stub}.xlsx", buffer.getvalue()),
+            *_extra_attachment_files(job, period_stub, file_stub),
+        ]
+
     sheets = group_manager_reports_by_filial(job.reports)
     file_stub = sanitize_download_label(job.display_name) or "gerente"
     buffer = build_multi_sheet_workbook(sheets)
-    return [(f"analiticos_gerente_{file_stub}_{period_stub}.xlsx", buffer.getvalue())]
+    return [
+        (f"analiticos_gerente_{file_stub}_{period_stub}.xlsx", buffer.getvalue()),
+        *_extra_attachment_files(job, period_stub, file_stub),
+    ]
 
 
 def send_report_email_jobs(jobs: list[ReportEmailJob], report_period: str) -> tuple[int, list[str]]:
@@ -2900,6 +2921,15 @@ def render_report_email_section(
     test_recipient = os.getenv("REPORT_EMAIL_TEST_RECIPIENT", "leonardo.mota@grupoluizhohl.com.br").strip()
     production_cc = os.getenv("REPORT_EMAIL_PRODUCTION_CC", "suelen.santana@grupoluizhohl.com.br").strip()
 
+    consorcio_paid = read_consorcio_paid(report_period)
+    consorcio_by_cod_vendedor: dict[str, pd.DataFrame] = {}
+    if consorcio_paid is not None and not consorcio_paid.empty and "cod_vendedor" in consorcio_paid.columns:
+        for cod_vendedor, group_df in consorcio_paid.groupby("cod_vendedor"):
+            consorcio_by_cod_vendedor[str(cod_vendedor)] = group_df.reset_index(drop=True)
+
+    consorcio_coordinator = read_consorcio_coordenador()
+    consorcio_coordinator_report_df = st.session_state.get("consorcio_coordinator_report_df")
+
     test_plan = build_report_email_plan(
         cen_analytic_reports,
         manager_relations,
@@ -2909,6 +2939,10 @@ def render_report_email_section(
         production_cc=production_cc,
         coordinator_report_df=coordinator_report_df,
         coordinator_analytic_df=used_implements_analytic_df,
+        consorcio_by_cod_vendedor=consorcio_by_cod_vendedor,
+        consorcio_coordinator_df=consorcio_coordinator_report_df,
+        consorcio_coordinator_email=consorcio_coordinator.get("email", ""),
+        consorcio_coordinator_name=consorcio_coordinator.get("nome", ""),
     )
     production_plan = build_report_email_plan(
         cen_analytic_reports,
@@ -2919,6 +2953,10 @@ def render_report_email_section(
         production_cc=production_cc,
         coordinator_report_df=coordinator_report_df,
         coordinator_analytic_df=used_implements_analytic_df,
+        consorcio_by_cod_vendedor=consorcio_by_cod_vendedor,
+        consorcio_coordinator_df=consorcio_coordinator_report_df,
+        consorcio_coordinator_email=consorcio_coordinator.get("email", ""),
+        consorcio_coordinator_name=consorcio_coordinator.get("nome", ""),
     )
 
     preview_rows = [
@@ -2927,12 +2965,13 @@ def render_report_email_section(
                 "cen": "CEN",
                 "manager": "Gerente",
                 "coordinator": "Coordenador",
+                "consorcio_coordinator": "Coordenador Consórcio",
             }.get(job.kind, job.kind),
             "Nome": job.display_name,
             "Para produção": job.to,
             "Cópia produção": ", ".join(job.cc),
             "Qtd. CENs no anexo": len(job.reports),
-            "Qtd. arquivos": len(job.attachments) if job.kind == "coordinator" else 1,
+            "Qtd. arquivos": len(job.attachments) if job.kind in {"coordinator", "consorcio_coordinator"} else 1,
         }
         for job in production_plan.jobs
     ]
