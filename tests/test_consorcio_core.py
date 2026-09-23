@@ -3,6 +3,7 @@ import unittest
 import pandas as pd
 
 from commission_tool.core.consorcio import (
+    CONSORCIO_ANALYTIC_COLUMN_MAP,
     STATUS_APTO,
     STATUS_BLOQUEADO_DUPLICADO,
     STATUS_BLOQUEADO_GERENTE,
@@ -12,6 +13,7 @@ from commission_tool.core.consorcio import (
     STATUS_BLOQUEADO_VALOR,
     STATUS_BLOQUEADO_VENDEDOR,
     STATUS_SEM_COMISSAO,
+    build_consorcio_analytic_df,
     build_premiacao_tables,
     enrich_consorcio_rows,
     suggest_cod_vendedor,
@@ -194,3 +196,112 @@ class SuggestionTests(unittest.TestCase):
         self.assertEqual(suggestions.loc[0, "sugestao_cen"], "MARCIO JOSE LOUREDO DE BESSA")
         self.assertEqual(suggestions.loc[0, "cod_vendedor"], "")
         self.assertEqual(suggestions.loc[1, "sugestao_cod_vendedor"], "")
+
+
+class ConsorcioAnalyticReportTests(unittest.TestCase):
+    def test_renames_columns_to_labels_in_expected_order(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "id": 1,
+                    "arquivo_origem": "arquivo.csv",
+                    "cd_pedido": "12345",
+                    "cd_grupo": "0301",
+                    "cd_cota": "0025",
+                    "versao": "0",
+                    "parcela": "001 / 003",
+                    "dt_aprovacao": "2026-09-10",
+                    "consorciado": "FULANO DE TAL",
+                    "vl_bem": 200000.0,
+                    "cd_pdv": "208016",
+                    "filial": "Loja Acreuna",
+                    "cd_vendedor_consorcio": "002197",
+                    "nm_vendedor_consorcio": "VENDEDOR A",
+                    "cod_vendedor": "00188",
+                    "cen": "VENDEDOR A",
+                    "gerente": "Reginaldo Pereira Garcia",
+                    "coordenador": "DJALMA RODRIGUES DE PAULA JUNIOR",
+                    "percentual_cen": 0.84,
+                    "valor_comissao_cen": 1680.0,
+                    "percentual_gestor": 0.0,
+                    "valor_comissao_gestor": 0.0,
+                    "percentual_coordenador": 0.0,
+                    "valor_comissao_coordenador": 0.0,
+                    "competencia_ano": 2026,
+                    "competencia_mes": 9,
+                    "mes_ano_comissao": "09/2026",
+                }
+            ]
+        )
+
+        analytic = build_consorcio_analytic_df(raw)
+
+        expected_columns = [label for _, label in CONSORCIO_ANALYTIC_COLUMN_MAP]
+        self.assertEqual(list(analytic.columns), expected_columns)
+        self.assertEqual(analytic.loc[0, "Filial"], "Loja Acreuna")
+        self.assertEqual(analytic.loc[0, "Data de Aprovação"], "10/09/2026")
+        self.assertEqual(analytic.loc[0, "Pedido"], "12345")
+        self.assertEqual(analytic.loc[0, "Grupo"], "0301")
+        self.assertEqual(analytic.loc[0, "Cota"], "0025")
+        self.assertEqual(analytic.loc[0, "Versão"], "0")
+        self.assertEqual(analytic.loc[0, "Consorciado"], "FULANO DE TAL")
+        self.assertEqual(analytic.loc[0, "Parcela"], "001 / 003")
+        self.assertEqual(analytic.loc[0, "Valor do Bem"], 200000.0)
+        self.assertEqual(analytic.loc[0, "% Comissão CEN"], 0.84)
+        self.assertEqual(analytic.loc[0, "Valor Comissão CEN"], 1680.0)
+        self.assertEqual(analytic.loc[0, "CEN"], "VENDEDOR A")
+        self.assertEqual(analytic.loc[0, "Gerente"], "Reginaldo Pereira Garcia")
+
+    def test_drops_internal_database_columns(self):
+        raw = pd.DataFrame(
+            [
+                {
+                    "id": 1,
+                    "arquivo_origem": "arquivo.csv",
+                    "cod_vendedor": "00188",
+                    "cd_vendedor_consorcio": "002197",
+                    "nm_vendedor_consorcio": "VENDEDOR A",
+                    "cd_pdv": "208016",
+                    "competencia_ano": 2026,
+                    "competencia_mes": 9,
+                    "mes_ano_comissao": "09/2026",
+                    "filial": "Loja Acreuna",
+                    "cen": "VENDEDOR A",
+                }
+            ]
+        )
+
+        analytic = build_consorcio_analytic_df(raw)
+
+        for internal_column in [
+            "id",
+            "arquivo_origem",
+            "cod_vendedor",
+            "cd_vendedor_consorcio",
+            "nm_vendedor_consorcio",
+            "cd_pdv",
+            "competencia_ano",
+            "competencia_mes",
+            "mes_ano_comissao",
+        ]:
+            self.assertNotIn(internal_column, analytic.columns)
+
+    def test_missing_source_column_becomes_empty_instead_of_raising(self):
+        raw = pd.DataFrame([{"filial": "Loja Acreuna", "cen": "VENDEDOR A"}])
+
+        analytic = build_consorcio_analytic_df(raw)
+
+        self.assertEqual(analytic.loc[0, "Filial"], "Loja Acreuna")
+        self.assertEqual(analytic.loc[0, "CEN"], "VENDEDOR A")
+        self.assertTrue(pd.isna(analytic.loc[0, "Cota"]))
+
+    def test_empty_input_returns_empty_frame_with_expected_columns(self):
+        analytic = build_consorcio_analytic_df(pd.DataFrame())
+
+        expected_columns = [label for _, label in CONSORCIO_ANALYTIC_COLUMN_MAP]
+        self.assertEqual(list(analytic.columns), expected_columns)
+        self.assertTrue(analytic.empty)
+
+        analytic_none = build_consorcio_analytic_df(None)
+        self.assertEqual(list(analytic_none.columns), expected_columns)
+        self.assertTrue(analytic_none.empty)

@@ -19,6 +19,7 @@ from commission_tool.core.apuracao import (
     filter_old_emissions,
     prepare_machine_apuracao,
 )
+from commission_tool.core.consorcio import build_consorcio_analytic_df
 from commission_tool.core.eligibility import diagnose_key_formats, run_eligibility_validation
 from commission_tool.core.formatting import format_currency_br, format_percent_br
 from commission_tool.core.paid_audit import (
@@ -2925,7 +2926,9 @@ def render_report_email_section(
     consorcio_by_cod_vendedor: dict[str, pd.DataFrame] = {}
     if consorcio_paid is not None and not consorcio_paid.empty and "cod_vendedor" in consorcio_paid.columns:
         for cod_vendedor, group_df in consorcio_paid.groupby("cod_vendedor"):
-            consorcio_by_cod_vendedor[str(cod_vendedor)] = group_df.reset_index(drop=True)
+            consorcio_by_cod_vendedor[str(cod_vendedor)] = build_consorcio_analytic_df(
+                group_df.reset_index(drop=True)
+            )
 
     consorcio_coordinator = read_consorcio_coordenador()
     consorcio_coordinator_report_df = st.session_state.get("consorcio_coordinator_report_df")
@@ -2971,7 +2974,11 @@ def render_report_email_section(
             "Para produção": job.to,
             "Cópia produção": ", ".join(job.cc),
             "Qtd. CENs no anexo": len(job.reports),
-            "Qtd. arquivos": len(job.attachments) if job.kind in {"coordinator", "consorcio_coordinator"} else 1,
+            "Qtd. arquivos": (
+                len(job.attachments)
+                if job.kind in {"coordinator", "consorcio_coordinator"}
+                else 1 + len(job.attachments)
+            ),
         }
         for job in production_plan.jobs
     ]

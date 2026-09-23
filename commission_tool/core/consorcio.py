@@ -235,6 +235,48 @@ def build_premiacao_tables(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     return {"cen": cen, "gestor": gestor, "coordenador": coordenador}
 
 
+CONSORCIO_ANALYTIC_COLUMN_MAP = [
+    ("filial", "Filial"),
+    ("dt_aprovacao", "Data de Aprovação"),
+    ("cd_pedido", "Pedido"),
+    ("cd_grupo", "Grupo"),
+    ("cd_cota", "Cota"),
+    ("versao", "Versão"),
+    ("consorciado", "Consorciado"),
+    ("parcela", "Parcela"),
+    ("vl_bem", "Valor do Bem"),
+    ("percentual_cen", "% Comissão CEN"),
+    ("valor_comissao_cen", "Valor Comissão CEN"),
+    ("cen", "CEN"),
+    ("gerente", "Gerente"),
+]
+
+
+def build_consorcio_analytic_df(df: pd.DataFrame | None) -> pd.DataFrame:
+    """Build the human-readable consortium analytic report used for e-mail attachments.
+
+    Renames the raw ``consorcio_pago`` columns to their Portuguese labels, in the
+    order defined by ``CONSORCIO_ANALYTIC_COLUMN_MAP``, and drops every internal
+    database column (id, competência, chaves de vendedor/de-para etc.). A missing
+    source column becomes an empty column instead of raising.
+    """
+    ordered_columns = [label for _, label in CONSORCIO_ANALYTIC_COLUMN_MAP]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=ordered_columns)
+
+    analytic = df.copy()
+    analytic = analytic.rename(columns={source: target for source, target in CONSORCIO_ANALYTIC_COLUMN_MAP})
+    for column in ordered_columns:
+        if column not in analytic.columns:
+            analytic[column] = None
+    if "Data de Aprovação" in analytic.columns:
+        parsed_dates = pd.to_datetime(analytic["Data de Aprovação"], errors="coerce")
+        analytic["Data de Aprovação"] = parsed_dates.dt.strftime("%d/%m/%Y").fillna(
+            analytic["Data de Aprovação"]
+        )
+    return analytic[ordered_columns].reset_index(drop=True)
+
+
 def suggest_cod_vendedor(
     vendedor_map: pd.DataFrame | None,
     manager_relations: pd.DataFrame | None,

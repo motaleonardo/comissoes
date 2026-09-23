@@ -2,7 +2,13 @@ import unittest
 
 import pandas as pd
 
-from commission_tool.core.report_email import build_report_email_plan, group_manager_reports_by_filial
+from commission_tool.core.report_email import (
+    CENEmailReport,
+    ReportEmailJob,
+    build_report_email_plan,
+    group_manager_reports_by_filial,
+)
+from commission_tool.ui.app import build_report_email_attachments
 
 
 class ReportEmailPlanTests(unittest.TestCase):
@@ -231,6 +237,50 @@ class ReportEmailPlanTests(unittest.TestCase):
         job = next(job for job in plan.jobs if job.kind == "consorcio_coordinator")
         self.assertEqual(job.to, "djalma.junior@hohl.com.br")
         self.assertIn("Consórcio", job.subject)
+
+
+class ReportEmailAttachmentsTests(unittest.TestCase):
+    def test_cen_job_with_consorcio_attachment_produces_two_distinct_xlsx_files(self):
+        report = CENEmailReport(cen_name="Ana CEN", cod_vendedor="A001", df=pd.DataFrame({"Valor": [10]}))
+        job = ReportEmailJob(
+            kind="cen",
+            display_name="Ana CEN",
+            to="ana@example.com",
+            cc=[],
+            subject="assunto",
+            body="corpo",
+            reports=[report],
+            attachments=[("Consórcio", pd.DataFrame({"Cota": ["0025"]}))],
+        )
+
+        files = build_report_email_attachments(job, "Setembro/2026")
+
+        self.assertEqual(len(files), 2)
+        names = [name for name, _ in files]
+        self.assertEqual(len(set(names)), 2, "os dois arquivos devem ter nomes distintos")
+        for name, content in files:
+            self.assertTrue(name.endswith(".xlsx"))
+            self.assertGreater(len(content), 0)
+
+    def test_consorcio_coordinator_job_produces_its_attachment_without_manager_path(self):
+        job = ReportEmailJob(
+            kind="consorcio_coordinator",
+            display_name="DJALMA RODRIGUES DE PAULA JUNIOR",
+            to="djalma.junior@hohl.com.br",
+            cc=[],
+            subject="Premiação de Consórcio - Setembro/2026",
+            body="corpo",
+            reports=[],
+            attachments=[("Premiação Consórcio", pd.DataFrame({"Nome": ["DJALMA"], "Valor Comissão": [310.49]}))],
+        )
+
+        files = build_report_email_attachments(job, "Setembro/2026")
+
+        self.assertEqual(len(files), 1)
+        name, content = files[0]
+        self.assertTrue(name.endswith(".xlsx"))
+        self.assertGreater(len(content), 0)
+        self.assertFalse(name.startswith("analiticos_gerente"))
 
 
 if __name__ == "__main__":
