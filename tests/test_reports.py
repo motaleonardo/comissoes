@@ -815,6 +815,33 @@ class ConsorcioInReportsTests(unittest.TestCase):
         self.assertEqual(report.loc[0, "Nome"], "DJALMA RODRIGUES DE PAULA JUNIOR")
         self.assertAlmostEqual(report.loc[0, "Valor Comissão"], 310.491225, places=6)
 
+    def test_coordinator_report_merges_names_with_different_accent_and_case(self):
+        consorcio_paid = pd.DataFrame(
+            [
+                {
+                    "mes_ano_comissao": "09/2026",
+                    "cod_vendedor": "00188",
+                    "coordenador": "Djalma Rodrigues de Paula Júnior",
+                    "vl_bem": 100000.0,
+                    "valor_comissao_coordenador": 150.0,
+                },
+                {
+                    "mes_ano_comissao": "09/2026",
+                    "cod_vendedor": "00199",
+                    "coordenador": "DJALMA RODRIGUES DE PAULA JUNIOR",
+                    "vl_bem": 50000.0,
+                    "valor_comissao_coordenador": 75.0,
+                },
+            ]
+        )
+
+        report = build_consorcio_coordinator_report(consorcio_paid, "09/2026")
+
+        self.assertEqual(len(report), 1)
+        self.assertEqual(report.loc[0, "Nome"], "Djalma Rodrigues de Paula Júnior")
+        self.assertAlmostEqual(report.loc[0, "Receita (VL Bem)"], 150000.0, places=2)
+        self.assertAlmostEqual(report.loc[0, "Valor Comissão"], 225.0, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

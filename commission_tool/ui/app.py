@@ -104,6 +104,7 @@ CURRENCY_COLUMNS = [
     "Margem + Incentivos R$",
     "Valor Comissão Margem",
     "Valor Comissão Total",
+    "Receita (VL Bem)",
     "Valor Comissão",
     "V1 - Saldo Incentivo",
     "V2 - Saldo Cliente",
@@ -117,7 +118,9 @@ CURRENCY_COLUMNS = [
     "Comissão Implementos",
     "Comissão Invasão de área",
     "Comissão Margem",
+    "Consórcio",
     "Comissão Total CEN",
+    "Gestor Consórcio",
     "Comissão Gerente",
     "Valor Total da Comissão",
 ]

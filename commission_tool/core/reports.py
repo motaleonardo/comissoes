@@ -191,6 +191,7 @@ def _prepare_consorcio_for_period(
 
     rows["__cod_vendedor"] = rows.get("cod_vendedor", pd.Series(dtype=object)).apply(_normalize_code)
     rows["__gerente"] = rows.get("gerente", pd.Series(dtype=object)).apply(_normalize_text)
+    rows["__coordenador"] = rows.get("coordenador", pd.Series(dtype=object)).apply(_normalize_text)
     for column in ["vl_bem", "valor_comissao_cen", "valor_comissao_gestor", "valor_comissao_coordenador"]:
         rows[column] = pd.to_numeric(
             rows[column] if column in rows.columns else pd.Series(index=rows.index, dtype=float),
@@ -212,13 +213,27 @@ def build_consorcio_coordinator_report(
     if rows.empty:
         return pd.DataFrame(columns=report_columns)
 
-    grouped = (
-        rows.groupby(rows.get("coordenador", pd.Series(dtype=object)).fillna("").astype(str).str.strip())
-        .agg({"vl_bem": "sum", "valor_comissao_coordenador": "sum"})
-        .reset_index()
-    )
-    grouped.columns = report_columns
-    return grouped
+    coordinator_rows: list[dict[str, float | str]] = []
+    for coordinator_key, coordinator_paid in rows.groupby("__coordenador", dropna=False):
+        display_candidates = (
+            coordinator_paid.get("coordenador", pd.Series(dtype=object))
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        coordinator_name = next(
+            (value for value in display_candidates if value),
+            str(coordinator_key).strip(),
+        )
+        coordinator_rows.append(
+            {
+                "Nome": coordinator_name,
+                "Receita (VL Bem)": coordinator_paid["vl_bem"].sum(),
+                "Valor Comissão": coordinator_paid["valor_comissao_coordenador"].sum(),
+            }
+        )
+
+    return pd.DataFrame(coordinator_rows, columns=report_columns).reset_index(drop=True)
 
 
 def _apply_consorcio_to_cen_report(report: pd.DataFrame, consorcio: pd.DataFrame) -> pd.DataFrame:
