@@ -74,6 +74,32 @@ class PaidCommissionMappingTests(unittest.TestCase):
         self.assertEqual(prepared.loc[0, "nro_chassi"], "CH1")
         self.assertEqual(prepared.loc[0, "valor_comissao_total"], 123.45)
 
+    def test_prepare_paid_commissions_maps_product_code(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "Tipo": "Faturamento",
+                    "Filial": "Loja A",
+                    "Nro Documento": "0001",
+                    "Produto Código": "CVD JD",
+                    "Classificação Venda": "Venda Direta",
+                    "Valor Comissão Total": 6000.0,
+                }
+            ]
+        )
+
+        prepared = _prepare_paid_commissions_df(
+            df,
+            competence_year=2026,
+            competence_month=9,
+            period_label="09/2026",
+            period_start=date(2026, 8, 16),
+            period_end=date(2026, 9, 15),
+            source="streamlit",
+        )
+
+        self.assertEqual(prepared.loc[0, "produto_codigo"], "CVD JD")
+
     def test_prepare_paid_commissions_maps_manager_fields(self):
         df = pd.DataFrame(
             [

@@ -645,6 +645,31 @@ class ReportsTests(unittest.TestCase):
             marcio_df["Valor Comissão Total"].sum(), 55.0,
         )
 
+    def test_analytic_report_includes_product_code(self):
+        paid = pd.DataFrame(
+            [
+                {
+                    "mes_ano_comissao": "09/2026",
+                    "cod_vendedor": "AAETBU",
+                    "cen": "ABNER SAMUEL FERREIRA COSTA",
+                    "filial": "Loja Vianopolis",
+                    "classificacao_venda": "Venda Direta",
+                    "produto_codigo": "CVD JD",
+                    "nro_documento": "000122580",
+                    "valor_comissao_fat": 6000.0,
+                    "valor_comissao_margem": 0.0,
+                    "valor_comissao_total": 6000.0,
+                }
+            ]
+        )
+
+        reports = build_cen_analytic_reports(paid, "09/2026")
+
+        self.assertEqual(len(reports), 1)
+        _, _, analytic = reports[0]
+        self.assertIn("Produto Código", analytic.columns)
+        self.assertEqual(analytic.loc[0, "Produto Código"], "CVD JD")
+
     def test_build_cen_analytic_reports_returns_empty_when_no_cen_has_value(self):
         paid = pd.DataFrame(
             [

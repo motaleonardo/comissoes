@@ -14,6 +14,7 @@ ANALYTIC_REPORT_COLUMN_MAP = [
     ("data_emissao", "Data de Emissão"),
     ("nro_documento", "Nro Documento"),
     ("nro_chassi", "Nro Chassi"),
+    ("produto_codigo", "Produto Código"),
     ("nome_cliente", "Nome do Cliente"),
     ("cen", "CEN"),
     ("classificacao_venda", "Classificação Venda"),

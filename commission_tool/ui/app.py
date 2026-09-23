@@ -2423,6 +2423,7 @@ def render_machine_extraction() -> None:
             "Nro Documento",
             "Modelo",
             "Nro Chassi",
+            "Produto Código",
             "Valor Comissão Total",
             "Qtd Lançamentos Pagos",
             "Valor Pago Histórico",

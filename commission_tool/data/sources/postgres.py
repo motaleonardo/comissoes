@@ -31,6 +31,7 @@ PAID_COLUMN_MAP = {
     "Data de Emissão": "data_emissao",
     "Nro Documento": "nro_documento",
     "Modelo": "modelo",
+    "Produto Código": "produto_codigo",
     "Nro Chassi": "nro_chassi",
     "Nome do Cliente": "nome_cliente",
     "CEN": "cen",
@@ -123,6 +124,7 @@ def ensure_commission_tables() -> None:
                     data_emissao DATE,
                     nro_documento TEXT,
                     modelo TEXT,
+                    produto_codigo TEXT,
                     nro_chassi TEXT,
                     nome_cliente TEXT,
                     cen TEXT,
@@ -167,6 +169,7 @@ def ensure_commission_tables() -> None:
                     data_emissao DATE,
                     nro_documento TEXT,
                     modelo TEXT,
+                    produto_codigo TEXT,
                     nro_chassi TEXT,
                     nome_cliente TEXT,
                     cen TEXT,
@@ -256,6 +259,10 @@ def ensure_commission_tables() -> None:
         conn.execute(text(f"ALTER TABLE {EXCLUDED_COMMISSIONS_TABLE} ADD COLUMN IF NOT EXISTS gerente TEXT"))
         conn.execute(text(f"ALTER TABLE {EXCLUDED_COMMISSIONS_TABLE} ADD COLUMN IF NOT EXISTS perc_comissao_gerente NUMERIC(12, 6)"))
         conn.execute(text(f"ALTER TABLE {EXCLUDED_COMMISSIONS_TABLE} ADD COLUMN IF NOT EXISTS valor_comissao_gerente NUMERIC(18, 2)"))
+        for table_name in (PAID_COMMISSIONS_TABLE, EXCLUDED_COMMISSIONS_TABLE):
+            conn.execute(
+                text(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS produto_codigo TEXT")
+            )
         conn.execute(
             text(
                 f"""

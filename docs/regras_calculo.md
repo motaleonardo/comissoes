@@ -50,3 +50,13 @@ Enquanto a planilha de configuração não for fornecida, a extração traz todo
 - Comissão é calculada no mês da venda ou no mês do pagamento do cliente?
 - Existe teto ou piso de comissão?
 - Existe aprovação manual antes de liberar pagamento?
+
+## Venda Direta (CVD JD)
+
+Vigente a partir de 09/2026, implementado em `commission_tool/core/apuracao.py`.
+
+- Entram apenas as linhas de `bdnFaturamentoMaquinas` cujo `[Produto Código]` é exatamente `CVD JD`. Os demais códigos com `CVD` continuam fora da apuração.
+- Classificação: `Venda Direta`, atribuída pelo código do produto, e não pelo cadastro do veículo (a maioria dessas linhas não tem chassi).
+- Comissão do CEN: 6% sobre a Receita Bruta. Sem comissão de margem e sem meta.
+- Comissão do gerente: 33% sobre a comissão do CEN, pela relação em `comissao_gerente_vendedor`.
+- Confronto com o histórico: linha com chassi usa chassi + documento; linha sem chassi usa apenas o documento.
