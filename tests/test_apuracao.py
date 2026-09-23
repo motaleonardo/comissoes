@@ -450,6 +450,62 @@ class ApuracaoTests(unittest.TestCase):
         self.assertEqual(dropped, 0)
         self.assertEqual(len(filtered), 1)
 
+    def test_venda_direta_uses_six_percent_and_ignores_margin_rules(self):
+        df_machine = pd.DataFrame(
+            [
+                {
+                    "Classificacao Venda": "Venda Direta",
+                    "Modelo": "",
+                    "Receita Bruta": 100000.0,
+                    "% Margem Bruta": 40.0,
+                },
+                {
+                    "Classificacao Venda": "Venda Direta",
+                    "Modelo": "6125J",
+                    "Receita Bruta": 250000.0,
+                    "% Margem Bruta": 40.0,
+                },
+            ]
+        ).rename(columns={"Classificacao Venda": "Classificação Venda"})
+        fat_rates = pd.DataFrame([{"modelo": "6125J", "percentual": 9.0}])
+        margin_rates = pd.DataFrame([{"modelo": "6125J", "percentual": 2.0, "meta_margem": 10.0}])
+
+        result = apply_commission_rules(df_machine, fat_rates, margin_rates)
+
+        self.assertEqual(result["% Comissão Fat."].tolist(), [6.0, 6.0])
+        self.assertEqual(result["Valor Comissão Fat."].tolist(), [6000.0, 15000.0])
+        self.assertEqual(result["% Comissão Margem"].tolist(), [0.0, 0.0])
+        self.assertEqual(result["Meta de Margem"].tolist(), [0.0, 0.0])
+        self.assertEqual(result["Valor Comissão Margem"].tolist(), [0.0, 0.0])
+        self.assertEqual(result["Valor Comissão Total"].tolist(), [6000.0, 15000.0])
+        self.assertEqual(result["Gatilho Comissão Margem Atingido"].tolist(), [False, False])
+        self.assertTrue(result["Regra Classificação Aplicada"].all())
+
+    def test_venda_direta_manager_keeps_thirty_three_percent(self):
+        df_machine = pd.DataFrame(
+            [
+                {
+                    "Classificação Venda": "Venda Direta",
+                    "Cod Vendedor": "aaetbu",
+                    "Valor Comissão Total": 6000.0,
+                }
+            ]
+        )
+        relations = pd.DataFrame(
+            [
+                {
+                    "cod_vendedor": "AAETBU",
+                    "gerente": "Clayton Monteiro de Castro Filho",
+                    "percentual_comissao_gerente": 33.0,
+                }
+            ]
+        )
+
+        result = apply_manager_commission_rules(df_machine, relations)
+
+        self.assertEqual(result.loc[0, "% Comissão Gerente"], 33.0)
+        self.assertAlmostEqual(result.loc[0, "Valor Comissão Gerente"], 1980.0, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ IMPLEMENTO_THRESHOLD = 200000.0
 IMPLEMENTO_RATE_AT_OR_ABOVE_THRESHOLD = 0.84
 IMPLEMENTO_RATE_BELOW_THRESHOLD = 1.0
 USED_MACHINE_RATE = 1.0
+VENDA_DIRETA_RATE = 6.0
 
 EMISSION_FILTER_CUTOFF = date(2025, 12, 1)
 EMISSION_FILTER_TIPOS = {"FATURAMENTO", "DEVOLUÇÃO", "DEVOLUCAO"}
@@ -179,7 +180,8 @@ def apply_commission_rules(
 
     implemento_mask = normalized_classification.eq("IMPLEMENTO")
     used_machine_mask = normalized_classification.eq("MAQUINAS JD - USADOS")
-    classification_override_mask = implemento_mask | used_machine_mask
+    venda_direta_mask = normalized_classification.eq("VENDA DIRETA")
+    classification_override_mask = implemento_mask | used_machine_mask | venda_direta_mask
 
     result.loc[implemento_mask & receita_bruta.ge(IMPLEMENTO_THRESHOLD), "% Comissão Fat."] = (
         IMPLEMENTO_RATE_AT_OR_ABOVE_THRESHOLD
@@ -188,6 +190,7 @@ def apply_commission_rules(
         IMPLEMENTO_RATE_BELOW_THRESHOLD
     )
     result.loc[used_machine_mask, "% Comissão Fat."] = USED_MACHINE_RATE
+    result.loc[venda_direta_mask, "% Comissão Fat."] = VENDA_DIRETA_RATE
     result.loc[classification_override_mask, ["% Comissão Margem", "Meta de Margem"]] = 0.0
     result.loc[classification_override_mask, "Regra Comissão Fat. Encontrada"] = True
     result.loc[classification_override_mask, "Regra Comissão Margem Encontrada"] = True
