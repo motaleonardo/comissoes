@@ -233,3 +233,31 @@ def build_premiacao_tables(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
         .reset_index(drop=True)
     )
     return {"cen": cen, "gestor": gestor, "coordenador": coordenador}
+
+
+def suggest_cod_vendedor(
+    vendedor_map: pd.DataFrame | None,
+    manager_relations: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Suggest an ERP seller code by exact name match. Never fills cod_vendedor."""
+    columns = ["cd_vendedor_consorcio", "nm_vendedor_consorcio", "cod_vendedor", "sugestao_cod_vendedor", "sugestao_cen"]
+    if vendedor_map is None or vendedor_map.empty:
+        return pd.DataFrame(columns=columns)
+
+    result = vendedor_map.copy().reset_index(drop=True)
+    result["cod_vendedor"] = result["cod_vendedor"].fillna("").astype(str).str.strip().str.upper()
+
+    by_name: dict[str, tuple[str, str]] = {}
+    if manager_relations is not None and not manager_relations.empty:
+        relations = manager_relations.copy()
+        relations["__nome"] = relations["vendedor"].apply(normalize_text)
+        relations = relations[relations["__nome"].ne("")].drop_duplicates(subset=["__nome"], keep="first")
+        by_name = {
+            row["__nome"]: (normalize_code(row["cod_vendedor"]), str(row["vendedor"]).strip())
+            for _, row in relations.iterrows()
+        }
+
+    nomes = result["nm_vendedor_consorcio"].apply(normalize_text)
+    result["sugestao_cod_vendedor"] = nomes.map(lambda nome: by_name.get(nome, ("", ""))[0])
+    result["sugestao_cen"] = nomes.map(lambda nome: by_name.get(nome, ("", ""))[1])
+    return result[columns]

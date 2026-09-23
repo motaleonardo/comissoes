@@ -14,6 +14,7 @@ from commission_tool.core.consorcio import (
     STATUS_SEM_COMISSAO,
     build_premiacao_tables,
     enrich_consorcio_rows,
+    suggest_cod_vendedor,
 )
 
 
@@ -173,3 +174,23 @@ class PremiacaoTests(unittest.TestCase):
         self.assertAlmostEqual(tables["gestor"].loc[0, "Valor a pagar"], 434.687715, places=6)
         self.assertEqual(tables["gestor"].loc[0, "Gestor"], "Reginaldo Pereira Garcia")
         self.assertAlmostEqual(tables["coordenador"].loc[0, "Valor a pagar"], 310.491225, places=6)
+
+
+class SuggestionTests(unittest.TestCase):
+    def test_suggests_by_exact_name_without_filling_cod_vendedor(self):
+        vendedor_map = pd.DataFrame(
+            [
+                {"cd_vendedor_consorcio": "002697", "nm_vendedor_consorcio": "Marcio Jose Louredo de Bessa", "cod_vendedor": ""},
+                {"cd_vendedor_consorcio": "009999", "nm_vendedor_consorcio": "NOME QUE NAO EXISTE", "cod_vendedor": ""},
+            ]
+        )
+        relations = pd.DataFrame(
+            [{"cod_vendedor": "A0000E", "vendedor": "MARCIO JOSE LOUREDO DE BESSA", "gerente": "Hernane Borges da Costa"}]
+        )
+
+        suggestions = suggest_cod_vendedor(vendedor_map, relations)
+
+        self.assertEqual(suggestions.loc[0, "sugestao_cod_vendedor"], "A0000E")
+        self.assertEqual(suggestions.loc[0, "sugestao_cen"], "MARCIO JOSE LOUREDO DE BESSA")
+        self.assertEqual(suggestions.loc[0, "cod_vendedor"], "")
+        self.assertEqual(suggestions.loc[1, "sugestao_cod_vendedor"], "")
