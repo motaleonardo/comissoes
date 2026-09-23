@@ -80,6 +80,7 @@ from commission_tool.data.sources.postgres import (
     save_model_margin_rates,
     save_paid_commissions,
 )
+from commission_tool.data.sources.postgres_consorcio import ensure_consorcio_tables
 from commission_tool.data.sources.sqlserver import get_connection
 from commission_tool.io.excel import (
     build_chassis_history_workbook,
@@ -89,6 +90,7 @@ from commission_tool.io.excel import (
 )
 from commission_tool.io.email import load_graph_settings, send_email_with_attachments
 from commission_tool.io.pdf import build_reports_pdf
+from commission_tool.ui.consorcio import render_consorcio_settings_sections
 
 
 CURRENCY_COLUMNS = [
@@ -3392,6 +3394,7 @@ def render_settings_view() -> None:
         if st.button("Garantir tabelas Postgres", width="stretch"):
             try:
                 ensure_commission_tables()
+                ensure_consorcio_tables()
                 st.success("Tabelas Postgres prontas.")
             except Exception as exc:
                 st.error(f"Não foi possível preparar as tabelas: {exc}")
@@ -3582,6 +3585,8 @@ def render_settings_view() -> None:
                 st.success(f"{count} relações de gerente salvas como nova versão ativa.")
             except Exception as exc:
                 st.error(f"Não foi possível salvar alterações de CEN x Gerente: {exc}")
+
+    render_consorcio_settings_sections()
 
 
 def main() -> None:
