@@ -312,6 +312,7 @@ class SQLServerDataSource:
               AND (
                   f.[Produto Código] IS NULL
                   OR LTRIM(RTRIM(f.[Produto Código])) NOT LIKE '%CVD%'
+                  OR LTRIM(RTRIM(f.[Produto Código])) = 'CVD JD'
               )
 
             UNION ALL
@@ -325,6 +326,7 @@ class SQLServerDataSource:
               AND (
                   d.[Produto Código] IS NULL
                   OR LTRIM(RTRIM(d.[Produto Código])) NOT LIKE '%CVD%'
+                  OR LTRIM(RTRIM(d.[Produto Código])) = 'CVD JD'
               )
         )
         SELECT
@@ -361,6 +363,7 @@ class SQLServerDataSource:
               AND (
                   f.[Produto Código] IS NULL
                   OR LTRIM(RTRIM(f.[Produto Código])) NOT LIKE '%CVD%'
+                  OR LTRIM(RTRIM(f.[Produto Código])) = 'CVD JD'
               )
               AND NULLIF(LTRIM(RTRIM(f.[Chassi])), '') IS NOT NULL
 
@@ -372,6 +375,7 @@ class SQLServerDataSource:
               AND (
                   d.[Produto Código] IS NULL
                   OR LTRIM(RTRIM(d.[Produto Código])) NOT LIKE '%CVD%'
+                  OR LTRIM(RTRIM(d.[Produto Código])) = 'CVD JD'
               )
               AND NULLIF(LTRIM(RTRIM(d.[Chassi])), '') IS NOT NULL
         ),
@@ -492,6 +496,7 @@ class SQLServerDataSource:
                 LTRIM(RTRIM(f.[Centro de Custo])) AS centro_custo,
                 f.[Data de Emissão] AS data_emissao,
                 f.[Nota Fiscal Número] AS nro_documento,
+                LTRIM(RTRIM(f.[Produto Código])) AS produto_codigo,
                 LTRIM(RTRIM(f.[Chassi])) AS chassi,
                 LTRIM(RTRIM(f.[Cliente Código])) AS cliente_codigo,
                 LTRIM(RTRIM(f.[Vendedor Código])) AS vendedor_codigo,
@@ -512,6 +517,7 @@ class SQLServerDataSource:
               AND (
                   f.[Produto Código] IS NULL
                   OR LTRIM(RTRIM(f.[Produto Código])) NOT LIKE '%CVD%'
+                  OR LTRIM(RTRIM(f.[Produto Código])) = 'CVD JD'
               )
 
             UNION ALL
@@ -521,6 +527,7 @@ class SQLServerDataSource:
                 LTRIM(RTRIM(d.[Centro de Custo])) AS centro_custo,
                 d.[Data de Emissão] AS data_emissao,
                 d.[Nota Fiscal Número] AS nro_documento,
+                LTRIM(RTRIM(d.[Produto Código])) AS produto_codigo,
                 LTRIM(RTRIM(d.[Chassi])) AS chassi,
                 LTRIM(RTRIM(d.[Cliente Código])) AS cliente_codigo,
                 LTRIM(RTRIM(d.[Vendedor Código])) AS vendedor_codigo,
@@ -544,6 +551,7 @@ class SQLServerDataSource:
               AND (
                   d.[Produto Código] IS NULL
                   OR LTRIM(RTRIM(d.[Produto Código])) NOT LIKE '%CVD%'
+                  OR LTRIM(RTRIM(d.[Produto Código])) = 'CVD JD'
               )
         )
         SELECT
@@ -551,6 +559,7 @@ class SQLServerDataSource:
             org.lojas AS [Filial],
             base.data_emissao AS [Data de Emissão],
             base.nro_documento AS [Nro Documento],
+            base.produto_codigo AS [Produto Código],
             veic.veiculo_modelo AS [Modelo],
             veic.veiculo_categoria AS [Veículo Categoria],
             veic.veiculo_estado AS [Veículo Estado],
@@ -560,6 +569,8 @@ class SQLServerDataSource:
             vend.vendedor_nome AS [CEN],
             base.vendedor_codigo AS [Cod Vendedor],
             CASE
+                WHEN base.produto_codigo = 'CVD JD'
+                    THEN 'Venda Direta'
                 WHEN UPPER(LTRIM(RTRIM(COALESCE(veic.veiculo_categoria, '')))) = 'IP'
                     THEN 'Implemento'
                 WHEN UPPER(LTRIM(RTRIM(COALESCE(veic.veiculo_estado, '')))) = 'NOVO'
