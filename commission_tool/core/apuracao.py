@@ -373,10 +373,10 @@ def _paid_status(row: pd.Series) -> str:
     tem_negativo = bool(row.get("Tem Estorno Negativo", False))
     documento_ja_tratado = bool(row.get("Documento Já Tratado", False))
 
-    if qtd == 0 and not tem_positivo and not tem_negativo:
-        return "Novo para apuração"
     if documento_ja_tratado:
         return "Já tratado neste documento"
+    if qtd == 0 and not tem_positivo and not tem_negativo:
+        return "Novo para apuração"
     if tem_negativo and tem_positivo:
         if saldo > 0:
             return "Atenção: pagamento e estorno parcial"

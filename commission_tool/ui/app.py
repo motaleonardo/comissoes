@@ -2422,14 +2422,17 @@ def render_machine_extraction() -> None:
             "Data de Emissão",
             "Nro Documento",
             "Modelo",
-            "Nro Chassi",
             "Produto Código",
+            "Nro Chassi",
             "Valor Comissão Total",
             "Qtd Lançamentos Pagos",
             "Valor Pago Histórico",
             "Valor Estornado Histórico",
             "Saldo Comissão Paga Chassi",
             "Qtd Lançamentos Excluídos",
+            "Qtd Lançamentos Pagos no Documento",
+            "Documento Já Tratado",
+            "Qtd Lançamentos Excluídos no Documento",
             "Bloqueado por Exclusão",
             "Status Confronto Pagas",
             "Bloqueado por Pagamento Histórico",
@@ -3601,6 +3604,8 @@ def main() -> None:
         st.session_state.machine_paid_summary_df = None
     if "machine_excluded_summary_df" not in st.session_state:
         st.session_state.machine_excluded_summary_df = None
+    if "machine_excluded_document_summary_df" not in st.session_state:
+        st.session_state.machine_excluded_document_summary_df = None
     if "machine_pay_review_df" not in st.session_state:
         st.session_state.machine_pay_review_df = None
     if "machine_exclude_review_df" not in st.session_state:

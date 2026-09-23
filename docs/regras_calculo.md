@@ -60,3 +60,4 @@ Vigente a partir de 09/2026, implementado em `commission_tool/core/apuracao.py`.
 - Comissão do CEN: 6% sobre a Receita Bruta. Sem comissão de margem e sem meta.
 - Comissão do gerente: 33% sobre a comissão do CEN, pela relação em `comissao_gerente_vendedor`.
 - Confronto com o histórico: linha com chassi usa chassi + documento; linha sem chassi usa apenas o documento.
+- Limitação conhecida: quando uma nota sem chassi tem mais de uma linha, a trava é por documento. Todas as linhas dessa nota devem ser pagas na mesma apuração; se apenas parte for paga, o restante fica bloqueado como "Já tratado neste documento" e precisa de correção manual.

@@ -451,6 +451,8 @@ class ApuracaoTests(unittest.TestCase):
 
         self.assertEqual(full_history["Bloqueado por Pagamento Histórico"].tolist(), [True, False, False])
         self.assertEqual(candidates["Nro Documento"].tolist(), ["000999999", "000122580"])
+        self.assertEqual(full_history.loc[0, "Status Confronto Pagas"], "Já tratado neste documento")
+        self.assertEqual(full_history.loc[1, "Status Confronto Pagas"], "Novo para apuração")
 
     def test_excluded_document_summary_blocks_row_without_chassi(self):
         df_machine = pd.DataFrame(
