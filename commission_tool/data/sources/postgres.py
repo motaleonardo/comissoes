@@ -829,7 +829,10 @@ def read_paid_commission_chassis_summary() -> pd.DataFrame:
 
 
 def read_paid_commission_document_summary() -> pd.DataFrame:
-    """Read all paid commission history aggregated by chassis and document."""
+    """Read all paid commission history aggregated by chassis and document.
+
+    Rows without chassis are kept: for them the document alone is the key.
+    """
     from sqlalchemy import text
 
     ensure_commission_tables()
@@ -837,16 +840,14 @@ def read_paid_commission_document_summary() -> pd.DataFrame:
     query = text(
         f"""
         SELECT
-            UPPER(TRIM(nro_chassi)) AS nro_chassi,
+            COALESCE(UPPER(TRIM(nro_chassi)), '') AS nro_chassi,
             TRIM(nro_documento) AS nro_documento,
             COUNT(*) AS qtd_lancamentos_documento_pago,
             COALESCE(SUM(valor_comissao_total), 0) AS valor_comissao_total_documento
         FROM {PAID_COMMISSIONS_TABLE}
-        WHERE nro_chassi IS NOT NULL
-          AND TRIM(nro_chassi) <> ''
-          AND nro_documento IS NOT NULL
+        WHERE nro_documento IS NOT NULL
           AND TRIM(nro_documento) <> ''
-        GROUP BY UPPER(TRIM(nro_chassi)), TRIM(nro_documento)
+        GROUP BY COALESCE(UPPER(TRIM(nro_chassi)), ''), TRIM(nro_documento)
         """
     )
     return pd.read_sql(query, engine)
@@ -868,6 +869,27 @@ def read_excluded_commission_chassis_summary() -> pd.DataFrame:
         WHERE nro_chassi IS NOT NULL
           AND TRIM(nro_chassi) <> ''
         GROUP BY UPPER(TRIM(nro_chassi))
+        """
+    )
+    return pd.read_sql(query, engine)
+
+
+def read_excluded_commission_document_summary() -> pd.DataFrame:
+    """Read manually excluded commissions aggregated by chassis and document."""
+    from sqlalchemy import text
+
+    ensure_commission_tables()
+    engine = get_engine()
+    query = text(
+        f"""
+        SELECT
+            COALESCE(UPPER(TRIM(nro_chassi)), '') AS nro_chassi,
+            TRIM(nro_documento) AS nro_documento,
+            COUNT(*) AS qtd_lancamentos_excluidos
+        FROM {EXCLUDED_COMMISSIONS_TABLE}
+        WHERE nro_documento IS NOT NULL
+          AND TRIM(nro_documento) <> ''
+        GROUP BY COALESCE(UPPER(TRIM(nro_chassi)), ''), TRIM(nro_documento)
         """
     )
     return pd.read_sql(query, engine)

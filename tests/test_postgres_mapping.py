@@ -11,6 +11,8 @@ from commission_tool.data.sources.postgres import (
     _prepare_manager_relations,
     _prepare_model_margin_rates,
     _prepare_paid_commissions_df,
+    read_excluded_commission_document_summary,
+    read_paid_commission_document_summary,
     replace_active_manager_relations,
     replace_active_model_fat_rates,
     replace_active_model_margin_rates,
@@ -313,6 +315,34 @@ class PaidCommissionMappingTests(unittest.TestCase):
         self.assertEqual(captured["if_exists"], "append")
         self.assertEqual(captured["df"].loc[0, "nro_chassi"], "CH_EXCLUDED")
         self.assertEqual(captured["df"].loc[0, "valor_comissao_total"], 123.45)
+
+
+class DocumentSummaryQueryTests(unittest.TestCase):
+    def _captured_sql(self, func):
+        with patch("commission_tool.data.sources.postgres.ensure_commission_tables"), patch(
+            "commission_tool.data.sources.postgres.get_engine",
+            return_value=object(),
+        ), patch(
+            "commission_tool.data.sources.postgres.pd.read_sql",
+            return_value=pd.DataFrame(),
+        ) as read_sql:
+            func()
+        return str(read_sql.call_args.args[0])
+
+    def test_paid_document_summary_keeps_rows_without_chassi(self):
+        sql = self._captured_sql(read_paid_commission_document_summary)
+
+        self.assertIn("COALESCE(UPPER(TRIM(nro_chassi)), '') AS nro_chassi", sql)
+        self.assertIn("TRIM(nro_documento) <> ''", sql)
+        self.assertNotIn("TRIM(nro_chassi) <> ''", sql)
+
+    def test_excluded_document_summary_groups_by_chassi_and_document(self):
+        sql = self._captured_sql(read_excluded_commission_document_summary)
+
+        self.assertIn(EXCLUDED_COMMISSIONS_TABLE, sql)
+        self.assertIn("COALESCE(UPPER(TRIM(nro_chassi)), '') AS nro_chassi", sql)
+        self.assertIn("TRIM(nro_documento) AS nro_documento", sql)
+        self.assertIn("COUNT(*) AS qtd_lancamentos_excluidos", sql)
 
 
 if __name__ == "__main__":

@@ -424,6 +424,55 @@ class ApuracaoTests(unittest.TestCase):
         self.assertTrue(full_history.loc[1, "Bloqueado por Exclusão"])
         self.assertIn("excluído", full_history.loc[1, "Status Confronto Pagas"].lower())
 
+    def test_paid_history_blocks_document_without_chassi(self):
+        df_machine = pd.DataFrame(
+            [
+                {"Nro Chassi": "", "Nro Documento": "000122580", "Valor Comissão Total": 100.0},
+                {"Nro Chassi": "", "Nro Documento": "000999999", "Valor Comissão Total": 100.0},
+                {"Nro Chassi": "CH1", "Nro Documento": "000122580", "Valor Comissão Total": 100.0},
+            ]
+        )
+        paid_document_summary = pd.DataFrame(
+            [
+                {
+                    "nro_chassi": "",
+                    "nro_documento": "122580",
+                    "qtd_lancamentos_documento_pago": 1,
+                    "valor_comissao_total_documento": 100.0,
+                }
+            ]
+        )
+
+        candidates, full_history = apply_paid_history_filter(
+            df_machine,
+            paid_summary=None,
+            paid_document_summary=paid_document_summary,
+        )
+
+        self.assertEqual(full_history["Bloqueado por Pagamento Histórico"].tolist(), [True, False, False])
+        self.assertEqual(candidates["Nro Documento"].tolist(), ["000999999", "000122580"])
+
+    def test_excluded_document_summary_blocks_row_without_chassi(self):
+        df_machine = pd.DataFrame(
+            [
+                {"Nro Chassi": "", "Nro Documento": "000122580", "Valor Comissão Total": 100.0},
+                {"Nro Chassi": "", "Nro Documento": "000999999", "Valor Comissão Total": 100.0},
+            ]
+        )
+        excluded_document_summary = pd.DataFrame(
+            [{"nro_chassi": "", "nro_documento": "122580", "qtd_lancamentos_excluidos": 1}]
+        )
+
+        candidates, full_history = apply_paid_history_filter(
+            df_machine,
+            paid_summary=None,
+            excluded_document_summary=excluded_document_summary,
+        )
+
+        self.assertEqual(full_history["Bloqueado por Exclusão"].tolist(), [True, False])
+        self.assertEqual(full_history.loc[0, "Status Confronto Pagas"], "Excluído manualmente")
+        self.assertEqual(candidates["Nro Documento"].tolist(), ["000999999"])
+
     def test_filter_old_emissions_drops_faturamento_devolucao_before_cutoff(self):
         df = pd.DataFrame(
             [

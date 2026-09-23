@@ -395,6 +395,7 @@ def apply_paid_history_filter(
     paid_summary: pd.DataFrame | None,
     paid_document_summary: pd.DataFrame | None = None,
     excluded_summary: pd.DataFrame | None = None,
+    excluded_document_summary: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Filter out exact chassis/document pairs already treated while keeping chassis history for review."""
     result = df_machine.copy()
@@ -485,6 +486,37 @@ def apply_paid_history_filter(
         ).fillna(0)
         result["Bloqueado por Exclusão"] = result["Qtd Lançamentos Excluídos"] > 0
 
+    if excluded_document_summary is None or excluded_document_summary.empty:
+        result["Qtd Lançamentos Excluídos no Documento"] = 0
+    else:
+        excluded_doc = excluded_document_summary.copy()
+        excluded_doc_chassi_col = _find_column(excluded_doc, ["nro_chassi", "Nro Chassi", "NRO_CHASSI"])
+        excluded_doc_document_col = _find_column(
+            excluded_doc,
+            ["nro_documento", "Nro Documento", "NRO_DOCUMENTO"],
+        )
+        excluded_doc["__chassi_key"] = excluded_doc[excluded_doc_chassi_col].apply(normalize_chassi)
+        excluded_doc["__document_key"] = excluded_doc[excluded_doc_document_col].apply(normalize_document)
+        excluded_doc["__pair_key"] = excluded_doc["__chassi_key"] + "||" + excluded_doc["__document_key"]
+        excluded_doc = excluded_doc.rename(
+            columns={"qtd_lancamentos_excluidos": "Qtd Lançamentos Excluídos no Documento"}
+        )
+        if "Qtd Lançamentos Excluídos no Documento" not in excluded_doc.columns:
+            excluded_doc["Qtd Lançamentos Excluídos no Documento"] = 1
+        excluded_doc = excluded_doc[["__pair_key", "Qtd Lançamentos Excluídos no Documento"]].drop_duplicates(
+            subset=["__pair_key"],
+            keep="first",
+        )
+        result = result.merge(excluded_doc, on="__pair_key", how="left")
+
+    result["Qtd Lançamentos Excluídos no Documento"] = pd.to_numeric(
+        result["Qtd Lançamentos Excluídos no Documento"],
+        errors="coerce",
+    ).fillna(0)
+    result["Bloqueado por Exclusão"] = result["Bloqueado por Exclusão"] | result[
+        "Qtd Lançamentos Excluídos no Documento"
+    ].gt(0)
+
     numeric_columns = [
         "Qtd Lançamentos Pagos",
         "Valor Pago Histórico",
@@ -493,6 +525,7 @@ def apply_paid_history_filter(
         "Qtd Lançamentos Pagos no Documento",
         "Valor Comissão Histórica Documento",
         "Qtd Lançamentos Excluídos",
+        "Qtd Lançamentos Excluídos no Documento",
     ]
     for column in numeric_columns:
         result[column] = pd.to_numeric(result[column], errors="coerce").fillna(0)
@@ -519,7 +552,14 @@ def prepare_machine_apuracao(
     paid_document_summary: pd.DataFrame | None = None,
     manager_relations: pd.DataFrame | None = None,
     excluded_summary: pd.DataFrame | None = None,
+    excluded_document_summary: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     calculated = apply_commission_rules(df_machine, fat_rates, margin_rates)
     calculated = apply_manager_commission_rules(calculated, manager_relations)
-    return apply_paid_history_filter(calculated, paid_summary, paid_document_summary, excluded_summary)
+    return apply_paid_history_filter(
+        calculated,
+        paid_summary,
+        paid_document_summary,
+        excluded_summary,
+        excluded_document_summary,
+    )
