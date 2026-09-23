@@ -80,6 +80,18 @@ def parse_commission_percent_points(value: Any) -> float:
     return parsed
 
 
+def normalize_pdv(value: Any) -> str:
+    """Normalize a PDV code: '002001' and '2001' are the same PDV."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ""
+    text = str(value).strip()
+    if text.endswith(".0") and text[:-2].isdigit():
+        text = text[:-2]
+    if text.isdigit():
+        return text.lstrip("0") or "0"
+    return text.upper()
+
+
 def parse_margin_target_percent_points(value: Any) -> float:
     """Parse margin-target percentages into percentage points.
 
