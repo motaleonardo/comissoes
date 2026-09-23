@@ -307,3 +307,143 @@ def read_consorcio_coordenador() -> dict:
 def save_consorcio_coordenador(nome: str, email: str) -> None:
     prepared = pd.DataFrame([{"nome": str(nome).strip(), "email": str(email).strip(), "ativo": True}])
     _replace_active(CONSORCIO_COORDENADOR_TABLE, prepared)
+
+
+CONSORCIO_PAID_COLUMNS = [
+    "arquivo_origem",
+    "cd_pedido",
+    "cd_grupo",
+    "cd_cota",
+    "versao",
+    "parcela",
+    "st_contemplacao",
+    "dt_alocacao",
+    "dt_aprovacao",
+    "consorciado",
+    "vl_bem",
+    "cd_pdv",
+    "filial",
+    "cd_vendedor_consorcio",
+    "nm_vendedor_consorcio",
+    "cod_vendedor",
+    "cen",
+    "gerente",
+    "coordenador",
+    "percentual_cen",
+    "valor_comissao_cen",
+    "percentual_gestor",
+    "valor_comissao_gestor",
+    "percentual_coordenador",
+    "valor_comissao_coordenador",
+]
+
+
+def _prepare_consorcio_paid(
+    df: pd.DataFrame,
+    competence_year: int,
+    competence_month: int,
+    period_label: str,
+) -> pd.DataFrame:
+    source = df.copy()
+    if "apto" in source.columns:
+        source = source[source["apto"].fillna(False).astype(bool)]
+
+    prepared = pd.DataFrame(index=range(len(source)))
+    source = source.reset_index(drop=True)
+    for column in CONSORCIO_PAID_COLUMNS:
+        prepared[column] = source[column] if column in source.columns else None
+
+    for column in ["dt_alocacao", "dt_aprovacao"]:
+        prepared[column] = pd.to_datetime(prepared[column], dayfirst=True, errors="coerce").dt.date
+    for column in [
+        "vl_bem",
+        "percentual_cen",
+        "valor_comissao_cen",
+        "percentual_gestor",
+        "valor_comissao_gestor",
+        "percentual_coordenador",
+        "valor_comissao_coordenador",
+    ]:
+        prepared[column] = pd.to_numeric(prepared[column].apply(parse_br_number), errors="coerce")
+
+    prepared.insert(0, "mes_ano_comissao", period_label)
+    prepared.insert(0, "competencia_mes", int(competence_month))
+    prepared.insert(0, "competencia_ano", int(competence_year))
+    return prepared.reset_index(drop=True)
+
+
+def save_consorcio_paid(
+    df: pd.DataFrame,
+    competence_year: int,
+    competence_month: int,
+    period_label: str,
+) -> int:
+    """Persist the selected consortium rows. The unique index blocks a repeated cota."""
+    ensure_consorcio_tables()
+    prepared = _prepare_consorcio_paid(df, competence_year, competence_month, period_label)
+    if prepared.empty:
+        return 0
+    engine = get_engine()
+    with engine.begin() as conn:
+        prepared.to_sql(CONSORCIO_PAID_TABLE, conn, if_exists="append", index=False)
+    return len(prepared)
+
+
+def read_consorcio_paid_keys() -> dict[str, str]:
+    """Map every cota installment already paid to the competence it was paid in."""
+    from sqlalchemy import text
+
+    ensure_consorcio_tables()
+    engine = get_engine()
+    rows = pd.read_sql(
+        text(
+            f"""
+            SELECT cd_grupo, cd_cota, versao, parcela, mes_ano_comissao
+            FROM {CONSORCIO_PAID_TABLE}
+            """
+        ),
+        engine,
+    )
+    if rows.empty:
+        return {}
+    keys = (
+        rows["cd_grupo"].fillna("").astype(str).str.strip().str.upper()
+        + "||"
+        + rows["cd_cota"].fillna("").astype(str).str.strip().str.upper()
+        + "||"
+        + rows["versao"].fillna("").astype(str).str.strip().str.upper()
+        + "||"
+        + rows["parcela"].fillna("").astype(str).str.split().str.join(" ").str.upper()
+    )
+    return dict(zip(keys, rows["mes_ano_comissao"].fillna("").astype(str)))
+
+
+def read_consorcio_paid(period_label: str | None = None) -> pd.DataFrame:
+    from sqlalchemy import text
+
+    ensure_consorcio_tables()
+    engine = get_engine()
+    if period_label:
+        query = text(
+            f"SELECT * FROM {CONSORCIO_PAID_TABLE} WHERE mes_ano_comissao = :period ORDER BY filial, cen, cd_cota"
+        )
+        return pd.read_sql(query, engine, params={"period": period_label})
+    return pd.read_sql(text(f"SELECT * FROM {CONSORCIO_PAID_TABLE} ORDER BY id"), engine)
+
+
+def read_consorcio_paid_period_labels() -> list[str]:
+    from sqlalchemy import text
+
+    ensure_consorcio_tables()
+    engine = get_engine()
+    rows = pd.read_sql(
+        text(
+            f"""
+            SELECT DISTINCT competencia_ano, competencia_mes, mes_ano_comissao
+            FROM {CONSORCIO_PAID_TABLE}
+            ORDER BY competencia_ano DESC, competencia_mes DESC
+            """
+        ),
+        engine,
+    )
+    return rows["mes_ano_comissao"].fillna("").astype(str).tolist()

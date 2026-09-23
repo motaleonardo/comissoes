@@ -4,11 +4,14 @@ from unittest.mock import patch
 import pandas as pd
 
 from commission_tool.data.sources.postgres_consorcio import (
+    CONSORCIO_PAID_TABLE,
     CONSORCIO_PDV_TABLE,
     CONSORCIO_VENDEDOR_TABLE,
+    _prepare_consorcio_paid,
     _prepare_consorcio_regras,
     _prepare_pdv_map,
     _prepare_vendedor_map,
+    read_consorcio_paid_keys,
     register_missing_consorcio_vendedores,
 )
 
@@ -139,6 +142,84 @@ class RegisterMissingTests(unittest.TestCase):
         self.assertEqual(captured["name"], CONSORCIO_VENDEDOR_TABLE)
         self.assertEqual(captured["df"]["cd_vendedor_consorcio"].tolist(), ["002697"])
         self.assertEqual(captured["df"]["cod_vendedor"].tolist(), [""])
+
+
+class PreparePaidTests(unittest.TestCase):
+    def test_keeps_only_apt_rows_and_expected_columns(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "arquivo_origem": "Acreuna.csv",
+                    "cd_pedido": "4504255710",
+                    "cd_grupo": "002362",
+                    "cd_cota": "0025",
+                    "versao": "00",
+                    "parcela": "001 / 003",
+                    "st_contemplacao": "Não Contemplada",
+                    "dt_alocacao": "21/07/2026",
+                    "dt_aprovacao": "27/07/2026",
+                    "consorciado": "CONSORCIADO TESTE",
+                    "vl_bem": 200000.0,
+                    "cd_pdv": "208016",
+                    "filial": "Loja Acreuna",
+                    "cd_vendedor_consorcio": "002197",
+                    "nm_vendedor_consorcio": "VENDEDOR A",
+                    "cod_vendedor": "00188",
+                    "cen": "VENDEDOR A",
+                    "gerente": "Reginaldo Pereira Garcia",
+                    "coordenador": "DJALMA RODRIGUES DE PAULA JUNIOR",
+                    "percentual_cen": 0.84,
+                    "valor_comissao_cen": 1680.0,
+                    "percentual_gestor": 0.0,
+                    "valor_comissao_gestor": 0.0,
+                    "percentual_coordenador": 0.0,
+                    "valor_comissao_coordenador": 0.0,
+                    "apto": True,
+                },
+                {
+                    "arquivo_origem": "Acreuna.csv",
+                    "cd_grupo": "002362",
+                    "cd_cota": "0026",
+                    "versao": "00",
+                    "parcela": "003 / 003",
+                    "vl_bem": 200000.0,
+                    "apto": False,
+                },
+            ]
+        )
+
+        prepared = _prepare_consorcio_paid(df, 2026, 9, "09/2026")
+
+        self.assertEqual(len(prepared), 1)
+        self.assertEqual(prepared.loc[0, "mes_ano_comissao"], "09/2026")
+        self.assertEqual(prepared.loc[0, "competencia_ano"], 2026)
+        self.assertEqual(prepared.loc[0, "competencia_mes"], 9)
+        self.assertEqual(str(prepared.loc[0, "dt_alocacao"]), "2026-07-21")
+        self.assertNotIn("apto", prepared.columns)
+        self.assertNotIn("status", prepared.columns)
+
+    def test_paid_keys_query_selects_key_columns(self):
+        with patch("commission_tool.data.sources.postgres_consorcio.ensure_consorcio_tables"), patch(
+            "commission_tool.data.sources.postgres_consorcio.get_engine",
+            return_value=object(),
+        ), patch(
+            "commission_tool.data.sources.postgres_consorcio.pd.read_sql",
+            return_value=pd.DataFrame(
+                [
+                    {
+                        "cd_grupo": "002362",
+                        "cd_cota": "0025",
+                        "versao": "00",
+                        "parcela": "001 / 003",
+                        "mes_ano_comissao": "08/2026",
+                    }
+                ]
+            ),
+        ) as read_sql:
+            keys = read_consorcio_paid_keys()
+
+        self.assertIn(CONSORCIO_PAID_TABLE, str(read_sql.call_args.args[0]))
+        self.assertEqual(keys, {"002362||0025||00||001 / 003": "08/2026"})
 
 
 if __name__ == "__main__":
