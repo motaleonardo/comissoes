@@ -90,7 +90,7 @@ from commission_tool.io.excel import (
 )
 from commission_tool.io.email import load_graph_settings, send_email_with_attachments
 from commission_tool.io.pdf import build_reports_pdf
-from commission_tool.ui.consorcio import render_consorcio_settings_sections
+from commission_tool.ui.consorcio import render_consorcio_apuracao, render_consorcio_settings_sections
 
 
 CURRENCY_COLUMNS = [
@@ -552,6 +552,7 @@ def render_sidebar() -> str:
             "Selecione a visão",
             options=[
                 "Apurações",
+                "Apuração Consórcio",
                 "Auditoria",
                 "Histórico de Chassis",
                 "Comissões pagas",
@@ -3669,6 +3670,8 @@ def main() -> None:
 
     if selected_view == "Apurações":
         render_machine_extraction()
+    elif selected_view == "Apuração Consórcio":
+        render_consorcio_apuracao()
     elif selected_view == "Auditoria":
         render_paid_audit_view()
     elif selected_view == "Histórico de Chassis":

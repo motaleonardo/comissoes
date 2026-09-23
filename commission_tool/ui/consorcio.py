@@ -2,22 +2,34 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import pandas as pd
 import streamlit as st
 
-from commission_tool.core.consorcio import suggest_cod_vendedor
+from commission_tool.core.consorcio import (
+    STATUS_APTO,
+    build_premiacao_tables,
+    enrich_consorcio_rows,
+    suggest_cod_vendedor,
+)
 from commission_tool.data.sources.postgres import read_manager_relations
 from commission_tool.data.sources.postgres_consorcio import (
     ensure_consorcio_tables,
     read_consorcio_coordenador,
+    read_consorcio_paid_keys,
     read_consorcio_pdv_map,
     read_consorcio_regras,
     read_consorcio_vendedor_map,
+    register_missing_consorcio_vendedores,
     replace_active_consorcio_pdv_map,
     replace_active_consorcio_regras,
     replace_active_consorcio_vendedor_map,
     save_consorcio_coordenador,
+    save_consorcio_paid,
 )
+from commission_tool.io.consorcio_csv import ConsorcioFileError, read_consorcio_csv
+from commission_tool.io.consorcio_excel import build_consorcio_workbook
 
 
 PDV_EDITOR_COLUMNS = ["cd_pdv", "nm_pdv", "filial"]
@@ -120,3 +132,96 @@ def render_consorcio_settings_sections() -> None:
     if st.button("Salvar coordenador", type="primary", key="consorcio_coord_save"):
         save_consorcio_coordenador(nome, email)
         st.success("Coordenador salvo.")
+
+
+def render_consorcio_apuracao() -> None:
+    st.markdown("## Apuração de Consórcio")
+    ensure_consorcio_tables()
+
+    hoje = date.today()
+    col_ano, col_mes = st.columns(2)
+    ano = col_ano.number_input("Ano da competência", min_value=2020, max_value=2100, value=hoje.year, step=1)
+    mes = col_mes.number_input("Mês da competência", min_value=1, max_value=12, value=hoje.month, step=1)
+    period_label = f"{int(mes):02d}/{int(ano)}"
+
+    uploads = st.file_uploader(
+        "Relatórios do sistema de consórcio (um CSV por loja)",
+        type=["csv"],
+        accept_multiple_files=True,
+        key="consorcio_uploads",
+    )
+    if not uploads:
+        st.info("Envie os arquivos para iniciar a apuração.")
+        return
+
+    frames = []
+    for uploaded in uploads:
+        try:
+            frames.append(read_consorcio_csv(uploaded, file_name=uploaded.name))
+            st.success(f"{uploaded.name}: {len(frames[-1])} linhas lidas.")
+        except ConsorcioFileError as exc:
+            st.error(f"{uploaded.name}: {exc}")
+    if not frames:
+        return
+
+    raw = pd.concat(frames, ignore_index=True)
+    novos = register_missing_consorcio_vendedores(raw)
+    if novos:
+        st.warning(
+            f"{novos} vendedor(es) de consórcio novo(s) cadastrado(s) sem CEN. "
+            "Preencha em Configurações para liberar o pagamento."
+        )
+
+    rows = enrich_consorcio_rows(
+        raw,
+        pdv_map=read_consorcio_pdv_map(),
+        vendedor_map=read_consorcio_vendedor_map(),
+        manager_relations=read_manager_relations(),
+        regras=read_consorcio_regras(),
+        coordenador=read_consorcio_coordenador(),
+        paid_keys=read_consorcio_paid_keys(),
+    )
+
+    aptos = rows[rows["apto"]]
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Linhas", len(rows))
+    col2.metric("CEN", f"R$ {aptos['valor_comissao_cen'].sum():,.2f}")
+    col3.metric("Gestores", f"R$ {aptos['valor_comissao_gestor'].sum():,.2f}")
+    col4.metric("Coordenador", f"R$ {aptos['valor_comissao_coordenador'].sum():,.2f}")
+
+    bloqueadas = rows[~rows["apto"] & rows["status"].ne("Sem comissão")]
+    if not bloqueadas.empty:
+        with st.expander(f"{len(bloqueadas)} linha(s) bloqueada(s)", expanded=True):
+            st.dataframe(bloqueadas["status"].value_counts().rename("Linhas"), width="stretch")
+
+    editor_df = rows.copy()
+    editor_df.insert(0, "Selecionar", editor_df["apto"])
+    edited = st.data_editor(
+        editor_df,
+        width="stretch",
+        disabled=[column for column in editor_df.columns if column != "Selecionar"],
+        key="consorcio_apuracao_editor",
+    )
+    selecionadas = edited[edited["Selecionar"].fillna(False) & edited["apto"]].drop(columns=["Selecionar"])
+
+    premiacao = build_premiacao_tables(selecionadas)
+    st.markdown("### Premiação a pagar")
+    st.dataframe(premiacao["cen"], width="stretch")
+    st.dataframe(premiacao["gestor"], width="stretch")
+    st.dataframe(premiacao["coordenador"], width="stretch")
+
+    st.download_button(
+        "Exportar Excel",
+        data=build_consorcio_workbook(selecionadas, premiacao),
+        file_name=f"consorcio_{int(ano)}_{int(mes):02d}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        width="stretch",
+    )
+
+    confirmar = st.checkbox(
+        f"Confirmo o pagamento de {len(selecionadas)} linha(s) na competência {period_label}",
+        key="consorcio_confirmar",
+    )
+    if st.button("Registrar pagamento", type="primary", disabled=not confirmar, width="stretch"):
+        gravadas = save_consorcio_paid(selecionadas, int(ano), int(mes), period_label)
+        st.success(f"{gravadas} linha(s) gravada(s) em {period_label}.")
