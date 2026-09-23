@@ -61,3 +61,16 @@ Vigente a partir de 09/2026, implementado em `commission_tool/core/apuracao.py`.
 - Comissão do gerente: 33% sobre a comissão do CEN, pela relação em `comissao_gerente_vendedor`.
 - Confronto com o histórico: linha com chassi usa chassi + documento; linha sem chassi usa apenas o documento.
 - Limitação conhecida: quando uma nota sem chassi tem mais de uma linha, a trava é por documento. Todas as linhas dessa nota devem ser pagas na mesma apuração; se apenas parte for paga, o restante fica bloqueado como "Já tratado neste documento" e precisa de correção manual.
+
+## Consórcio
+
+Vigente a partir de 09/2026, implementado em `commission_tool/core/consorcio.py`.
+
+- Entrada: CSV do sistema de consórcio, um por PDV, com upload na tela "Apuração Consórcio".
+- Base de cálculo: `VL_Bem`. O `VL_Comissao` do arquivo é informativo.
+- Percentuais por parcela, editáveis em Configurações (`comissao_consorcio_regras`):
+  parcela 001 paga 0,84% ao CEN; parcela 002 paga 0,21% ao gestor e 0,15% ao coordenador;
+  parcela 003 não paga ninguém.
+- A comissão do gestor no consórcio é um percentual sobre o bem, e **não** os 33% usados em máquinas.
+- Chave única de pagamento: grupo + cota + versão + parcela.
+- Linha sem de-para de PDV ou de vendedor fica bloqueada e nunca é paga por suposição.
