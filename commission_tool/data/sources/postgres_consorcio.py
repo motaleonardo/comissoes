@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from commission_tool.core.formatting import normalize_pdv, parse_br_number, parse_percent_points
+from commission_tool.core.formatting import normalize_pdv, parse_br_number, parse_commission_percent_points
 from commission_tool.data.sources.postgres import get_engine
 
 
@@ -273,20 +273,28 @@ def read_consorcio_regras() -> pd.DataFrame:
     )
 
 
-def replace_active_consorcio_regras(df: pd.DataFrame) -> int:
+def _prepare_consorcio_regras(df: pd.DataFrame) -> pd.DataFrame:
     prepared = pd.DataFrame(
         {
             "parcela": df.get("parcela", pd.Series(dtype=object)).fillna("").astype(str).str.strip(),
-            "percentual_cen": df.get("percentual_cen", pd.Series(dtype=object)).apply(parse_percent_points),
-            "percentual_gestor": df.get("percentual_gestor", pd.Series(dtype=object)).apply(parse_percent_points),
+            "percentual_cen": df.get("percentual_cen", pd.Series(dtype=object)).apply(
+                parse_commission_percent_points
+            ),
+            "percentual_gestor": df.get("percentual_gestor", pd.Series(dtype=object)).apply(
+                parse_commission_percent_points
+            ),
             "percentual_coordenador": df.get("percentual_coordenador", pd.Series(dtype=object)).apply(
-                parse_percent_points
+                parse_commission_percent_points
             ),
         }
     )
     prepared = prepared[prepared["parcela"].ne("")].drop_duplicates(subset=["parcela"], keep="first")
     prepared["ativo"] = True
-    return _replace_active(CONSORCIO_REGRAS_TABLE, prepared.reset_index(drop=True))
+    return prepared.reset_index(drop=True)
+
+
+def replace_active_consorcio_regras(df: pd.DataFrame) -> int:
+    return _replace_active(CONSORCIO_REGRAS_TABLE, _prepare_consorcio_regras(df))
 
 
 def read_consorcio_coordenador() -> dict:

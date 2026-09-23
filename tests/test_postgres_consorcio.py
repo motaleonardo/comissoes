@@ -6,6 +6,7 @@ import pandas as pd
 from commission_tool.data.sources.postgres_consorcio import (
     CONSORCIO_PDV_TABLE,
     CONSORCIO_VENDEDOR_TABLE,
+    _prepare_consorcio_regras,
     _prepare_pdv_map,
     _prepare_vendedor_map,
     register_missing_consorcio_vendedores,
@@ -61,6 +62,48 @@ class PrepareMapTests(unittest.TestCase):
 
         self.assertEqual(prepared["cd_vendedor_consorcio"].tolist(), ["002197", "002697"])
         self.assertEqual(prepared["cod_vendedor"].tolist(), ["00188", ""])
+
+
+class PrepareRegrasTests(unittest.TestCase):
+    def test_keeps_real_percentages_unscaled_when_given_as_float(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "parcela": "001 / 003",
+                    "percentual_cen": 0.84,
+                    "percentual_gestor": 0.0,
+                    "percentual_coordenador": 0.0,
+                },
+                {
+                    "parcela": "002 / 003",
+                    "percentual_cen": 0.0,
+                    "percentual_gestor": 0.21,
+                    "percentual_coordenador": 0.15,
+                },
+            ]
+        )
+
+        prepared = _prepare_consorcio_regras(df)
+
+        self.assertEqual(prepared["percentual_cen"].tolist(), [0.84, 0.0])
+        self.assertEqual(prepared["percentual_gestor"].tolist(), [0.0, 0.21])
+        self.assertEqual(prepared["percentual_coordenador"].tolist(), [0.0, 0.15])
+
+    def test_keeps_parsing_comma_decimal_strings(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "parcela": "001 / 003",
+                    "percentual_cen": "0,84",
+                    "percentual_gestor": "0,00",
+                    "percentual_coordenador": "0,00",
+                }
+            ]
+        )
+
+        prepared = _prepare_consorcio_regras(df)
+
+        self.assertEqual(prepared["percentual_cen"].tolist(), [0.84])
 
 
 class RegisterMissingTests(unittest.TestCase):
