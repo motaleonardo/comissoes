@@ -345,8 +345,8 @@ def _prepare_consorcio_paid(
     period_label: str,
 ) -> pd.DataFrame:
     source = df.copy()
-    if "apto" in source.columns:
-        source = source[source["apto"].fillna(False).astype(bool)]
+    apto = source.get("apto", pd.Series([False] * len(source), index=source.index))
+    source = source[apto.fillna(False).astype(bool)]
 
     prepared = pd.DataFrame(index=range(len(source)))
     source = source.reset_index(drop=True)
@@ -354,7 +354,8 @@ def _prepare_consorcio_paid(
         prepared[column] = source[column] if column in source.columns else None
 
     for column in ["dt_alocacao", "dt_aprovacao"]:
-        prepared[column] = pd.to_datetime(prepared[column], dayfirst=True, errors="coerce").dt.date
+        parsed = pd.to_datetime(prepared[column], dayfirst=True, errors="coerce").dt.date
+        prepared[column] = parsed.astype(object).where(parsed.notna(), None)
     for column in [
         "vl_bem",
         "percentual_cen",

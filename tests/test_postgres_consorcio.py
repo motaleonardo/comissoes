@@ -198,6 +198,42 @@ class PreparePaidTests(unittest.TestCase):
         self.assertNotIn("apto", prepared.columns)
         self.assertNotIn("status", prepared.columns)
 
+    def test_fails_closed_when_apto_column_is_missing(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "arquivo_origem": "Acreuna.csv",
+                    "cd_grupo": "002362",
+                    "cd_cota": "0025",
+                    "versao": "00",
+                    "parcela": "001 / 003",
+                    "vl_bem": 200000.0,
+                }
+            ]
+        )
+
+        prepared = _prepare_consorcio_paid(df, 2026, 9, "09/2026")
+
+        self.assertEqual(len(prepared), 0)
+
+    def test_missing_dt_alocacao_becomes_none(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "cd_grupo": "002362",
+                    "cd_cota": "0025",
+                    "versao": "00",
+                    "parcela": "001 / 003",
+                    "apto": True,
+                }
+            ]
+        )
+
+        prepared = _prepare_consorcio_paid(df, 2026, 9, "09/2026")
+
+        self.assertEqual(len(prepared), 1)
+        self.assertIsNone(prepared.loc[0, "dt_alocacao"])
+
     def test_paid_keys_query_selects_key_columns(self):
         with patch("commission_tool.data.sources.postgres_consorcio.ensure_consorcio_tables"), patch(
             "commission_tool.data.sources.postgres_consorcio.get_engine",
@@ -212,14 +248,27 @@ class PreparePaidTests(unittest.TestCase):
                         "versao": "00",
                         "parcela": "001 / 003",
                         "mes_ano_comissao": "08/2026",
-                    }
+                    },
+                    {
+                        "cd_grupo": "002362",
+                        "cd_cota": "0026",
+                        "versao": "00",
+                        "parcela": "001  /\t003",
+                        "mes_ano_comissao": "08/2026",
+                    },
                 ]
             ),
         ) as read_sql:
             keys = read_consorcio_paid_keys()
 
         self.assertIn(CONSORCIO_PAID_TABLE, str(read_sql.call_args.args[0]))
-        self.assertEqual(keys, {"002362||0025||00||001 / 003": "08/2026"})
+        self.assertEqual(
+            keys,
+            {
+                "002362||0025||00||001 / 003": "08/2026",
+                "002362||0026||00||001 / 003": "08/2026",
+            },
+        )
 
 
 if __name__ == "__main__":
