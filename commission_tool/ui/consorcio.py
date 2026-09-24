@@ -109,6 +109,18 @@ def render_consorcio_settings_sections() -> None:
         "Os vendedores novos entram automaticamente com o CEN em branco. "
         "A sugestão é apenas informativa: preencha o campo `cod_vendedor` para liberar o pagamento."
     )
+    vendedor_file = st.file_uploader(
+        "Excel com as colunas CD_Comissionado_Vendedor, NM_Comissionado_Vendedor e Cod Vendedor",
+        type=["xlsx"],
+        key="consorcio_vendedor_upload",
+    )
+    if vendedor_file is not None and st.button(
+        "Salvar de-para de Vendedor x CEN",
+        key="consorcio_vendedor_save_upload",
+    ):
+        count = replace_active_consorcio_vendedor_map(pd.read_excel(vendedor_file))
+        st.success(f"{count} vendedores salvos.")
+
     vendedor_df = prepare_vendedor_editor_df(read_consorcio_vendedor_map(), read_manager_relations())
     pendentes = int(vendedor_df["cod_vendedor"].eq("").sum()) if not vendedor_df.empty else 0
     if pendentes:

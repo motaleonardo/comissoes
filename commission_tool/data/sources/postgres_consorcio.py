@@ -142,6 +142,13 @@ def ensure_consorcio_tables() -> None:
             )
 
 
+def _column_or_blank(df: pd.DataFrame, column: str) -> pd.Series:
+    """Return the column as text, or a blank column when the file does not have it."""
+    if column in df.columns:
+        return df[column].fillna("").astype(str).str.strip()
+    return pd.Series([""] * len(df), index=df.index, dtype=object)
+
+
 def _prepare_pdv_map(df: pd.DataFrame) -> pd.DataFrame:
     source = df.rename(
         columns={
@@ -153,9 +160,9 @@ def _prepare_pdv_map(df: pd.DataFrame) -> pd.DataFrame:
     )
     prepared = pd.DataFrame(
         {
-            "cd_pdv": source.get("cd_pdv", pd.Series(dtype=object)).apply(normalize_pdv),
-            "nm_pdv": source.get("nm_pdv", pd.Series(dtype=object)).fillna("").astype(str).str.strip(),
-            "filial": source.get("filial", pd.Series(dtype=object)).fillna("").astype(str).str.strip(),
+            "cd_pdv": _column_or_blank(source, "cd_pdv").apply(normalize_pdv),
+            "nm_pdv": _column_or_blank(source, "nm_pdv"),
+            "filial": _column_or_blank(source, "filial"),
         }
     )
     prepared = prepared[prepared["cd_pdv"].ne("") & prepared["filial"].ne("")]
@@ -168,25 +175,20 @@ def _prepare_vendedor_map(df: pd.DataFrame) -> pd.DataFrame:
     source = df.rename(
         columns={
             "CD_Comissionado_Vendedor": "cd_vendedor_consorcio",
+            "CD_Comissionado_Vendedor_Atual": "cd_vendedor_consorcio",
+            "CD_Comissionado_Vendedor_Original": "cd_vendedor_consorcio",
             "NM_Comissionado_Vendedor": "nm_vendedor_consorcio",
+            "NM_Comissionado_Vendedor_Atual": "nm_vendedor_consorcio",
+            "NM_Comissionado_Vendedor_Original": "nm_vendedor_consorcio",
             "Cod Vendedor": "cod_vendedor",
+            "CEN": "cod_vendedor",
         }
     )
     prepared = pd.DataFrame(
         {
-            "cd_vendedor_consorcio": source.get("cd_vendedor_consorcio", pd.Series(dtype=object))
-            .fillna("")
-            .astype(str)
-            .str.strip(),
-            "nm_vendedor_consorcio": source.get("nm_vendedor_consorcio", pd.Series(dtype=object))
-            .fillna("")
-            .astype(str)
-            .str.strip(),
-            "cod_vendedor": source.get("cod_vendedor", pd.Series(dtype=object))
-            .fillna("")
-            .astype(str)
-            .str.strip()
-            .str.upper(),
+            "cd_vendedor_consorcio": _column_or_blank(source, "cd_vendedor_consorcio"),
+            "nm_vendedor_consorcio": _column_or_blank(source, "nm_vendedor_consorcio"),
+            "cod_vendedor": _column_or_blank(source, "cod_vendedor").str.upper(),
         }
     )
     prepared = prepared[prepared["cd_vendedor_consorcio"].ne("")]

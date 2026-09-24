@@ -68,6 +68,51 @@ class PrepareMapTests(unittest.TestCase):
         self.assertEqual(prepared["cd_vendedor_consorcio"].tolist(), ["002197", "002697"])
         self.assertEqual(prepared["cod_vendedor"].tolist(), ["00188", ""])
 
+    def test_vendedor_map_accepts_upload_column_names(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "CD_Comissionado_Vendedor": "002197",
+                    "NM_Comissionado_Vendedor": " VENDEDOR A ",
+                    "Cod Vendedor": "00188",
+                }
+            ]
+        )
+
+        prepared = _prepare_vendedor_map(df)
+
+        self.assertEqual(prepared["cd_vendedor_consorcio"].tolist(), ["002197"])
+        self.assertEqual(prepared["nm_vendedor_consorcio"].tolist(), ["VENDEDOR A"])
+        self.assertEqual(prepared["cod_vendedor"].tolist(), ["00188"])
+
+    def test_vendedor_map_accepts_atual_and_original_column_variants(self):
+        atual = pd.DataFrame(
+            [
+                {
+                    "CD_Comissionado_Vendedor_Atual": "002197",
+                    "NM_Comissionado_Vendedor_Atual": "VENDEDOR A",
+                    "CEN": "00188",
+                }
+            ]
+        )
+        original = pd.DataFrame(
+            [
+                {
+                    "CD_Comissionado_Vendedor_Original": "002697",
+                    "NM_Comissionado_Vendedor_Original": "VENDEDOR B",
+                }
+            ]
+        )
+
+        prepared_atual = _prepare_vendedor_map(atual)
+        prepared_original = _prepare_vendedor_map(original)
+
+        self.assertEqual(prepared_atual["cd_vendedor_consorcio"].tolist(), ["002197"])
+        self.assertEqual(prepared_atual["nm_vendedor_consorcio"].tolist(), ["VENDEDOR A"])
+        self.assertEqual(prepared_atual["cod_vendedor"].tolist(), ["00188"])
+        self.assertEqual(prepared_original["cd_vendedor_consorcio"].tolist(), ["002697"])
+        self.assertEqual(prepared_original["cod_vendedor"].tolist(), [""])
+
 
 class PrepareRegrasTests(unittest.TestCase):
     def test_keeps_real_percentages_unscaled_when_given_as_float(self):
