@@ -155,6 +155,46 @@ class PaidCommissionMappingTests(unittest.TestCase):
         self.assertEqual(prepared.loc[0, "perc_margem_direta"], 22.5)
         self.assertEqual(prepared.loc[0, "valor_comissao_total"], 750.0)
 
+    def test_prepare_paid_commissions_keeps_streamlit_percentage_points(self):
+        # A apuração da tela já entrega pontos percentuais: 1.0 = 1%, 0.45 = 0.45%.
+        df = pd.DataFrame(
+            [
+                {
+                    "Receita Bruta": 470000.0,
+                    "% Comissão Fat.": 1.0,
+                    "% Comissão Margem": 0.25,
+                    "% Margem Bruta": 0.8,
+                    "% Comissão Gerente": 33.0,
+                    "Valor Comissão Total": 4700.0,
+                },
+                {
+                    "Receita Bruta": 2215000.0,
+                    "% Comissão Fat.": 0.45,
+                    "% Comissão Margem": 0.0,
+                    "% Margem Bruta": 12.5,
+                    "% Comissão Gerente": 33.0,
+                    "Valor Comissão Total": 9967.5,
+                },
+            ]
+        )
+
+        for source in ["streamlit", "streamlit_manual", "streamlit_exclusao"]:
+            prepared = _prepare_paid_commissions_df(
+                df,
+                competence_year=2026,
+                competence_month=10,
+                period_label="Outubro/2026",
+                period_start=date(2026, 9, 16),
+                period_end=date(2026, 10, 15),
+                source=source,
+            )
+            self.assertEqual(prepared.loc[0, "perc_comissao_fat"], 1.0, source)
+            self.assertEqual(prepared.loc[0, "perc_comissao_margem"], 0.25, source)
+            self.assertEqual(prepared.loc[0, "perc_margem_bruta"], 0.8, source)
+            self.assertEqual(prepared.loc[0, "perc_comissao_gerente"], 33.0, source)
+            self.assertEqual(prepared.loc[1, "perc_comissao_fat"], 0.45, source)
+            self.assertEqual(prepared.loc[1, "perc_margem_bruta"], 12.5, source)
+
     def test_model_commission_percentages_do_not_multiply_decimal_inputs_by_one_hundred(self):
         fat_prepared = _prepare_model_fat_rates(
             pd.DataFrame([{"Modelo": "S550", "Percentual": 0.45}])

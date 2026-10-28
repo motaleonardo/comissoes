@@ -439,12 +439,25 @@ def _prepare_paid_commissions_df(
     for column in amount_columns:
         prepared[column] = prepared[column].apply(parse_br_number)
         prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
+    # Excel uploads may carry 5% as 0.05. The app's own apuração already sends
+    # percentage points (1.0 = 1%), so scaling those turned 1% into 100%.
+    excel_source = str(source or "").strip().lower().endswith("_excel")
     for column in percent_columns:
-        parser = parse_margin_target_percent_points if column == "meta_margem" else parse_percent_points
+        if column == "meta_margem":
+            parser = parse_margin_target_percent_points
+        elif excel_source:
+            parser = parse_percent_points
+        else:
+            parser = _parse_percent_points_unscaled
         prepared[column] = prepared[column].apply(parser)
         prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
 
     return prepared
+
+
+def _parse_percent_points_unscaled(value) -> float:
+    parsed = parse_br_number(value)
+    return 0.0 if parsed is None else parsed
 
 
 def _save_commission_rows(

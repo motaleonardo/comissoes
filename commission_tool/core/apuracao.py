@@ -340,6 +340,11 @@ def apply_frontend_default_fat_commission(
     result[valor_fat_col] = receita_values * pct_values / 100
     result[valor_total_col] = result[valor_fat_col] + margem_values
     result["Padrão 1% Fat. Aplicado"] = default_mask.astype(bool)
+
+    # The manager's share is a percentage of the CEN total, which may have just changed.
+    if "% Comissão Gerente" in result.columns:
+        manager_pct = pd.to_numeric(result["% Comissão Gerente"], errors="coerce").fillna(0.0)
+        result["Valor Comissão Gerente"] = result[valor_total_col] * manager_pct / 100
     return result
 
 

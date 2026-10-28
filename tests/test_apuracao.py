@@ -291,6 +291,37 @@ class ApuracaoTests(unittest.TestCase):
         self.assertEqual(result_disabled.loc[0, "Valor Comissão Total"], 50.0)
         self.assertFalse(result_disabled.loc[0, "Padrão 1% Fat. Aplicado"])
 
+    def test_default_fat_commission_recalculates_manager_commission(self):
+        # O gerente era calculado antes do padrão de 1% e ficava com R$ 0,00.
+        df_machine = pd.DataFrame(
+            [
+                {
+                    "Receita Bruta": 470000.0,
+                    "% Comissão Fat.": 0.0,
+                    "Valor Comissão Fat.": 0.0,
+                    "Valor Comissão Margem": 0.0,
+                    "Valor Comissão Total": 0.0,
+                    "% Comissão Gerente": 33.0,
+                    "Valor Comissão Gerente": 0.0,
+                },
+                {
+                    "Receita Bruta": 100000.0,
+                    "% Comissão Fat.": 0.6,
+                    "Valor Comissão Fat.": 600.0,
+                    "Valor Comissão Margem": 250.0,
+                    "Valor Comissão Total": 850.0,
+                    "% Comissão Gerente": 33.0,
+                    "Valor Comissão Gerente": 280.5,
+                },
+            ]
+        )
+
+        result = apply_frontend_default_fat_commission(df_machine, enabled=True)
+
+        self.assertAlmostEqual(result.loc[0, "Valor Comissão Total"], 4700.0)
+        self.assertAlmostEqual(result.loc[0, "Valor Comissão Gerente"], 1551.0)
+        self.assertAlmostEqual(result.loc[1, "Valor Comissão Gerente"], 280.5)
+
     def test_filters_positive_paid_history_and_keeps_negative_history_for_review(self):
         df_machine = pd.DataFrame(
             [
