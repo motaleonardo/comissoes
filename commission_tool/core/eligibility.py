@@ -15,6 +15,9 @@ from commission_tool.config import (
 )
 from commission_tool.data.sources.sqlserver import SQLServerDataSource
 
+VENDA_DIRETA_PRODUTO = "CVD JD"
+VENDA_DIRETA_DETALHE = "Venda Direta (CVD JD) dispensada da validação"
+
 
 def normalize_document(value: Any) -> str:
     if pd.isna(value):
@@ -59,7 +62,10 @@ def validate_incentive(source: SQLServerDataSource, chassi: Any) -> dict[str, An
         nf_numero = source.find_incentive_invoice_by_chassi(chassi_str)
         if not nf_numero:
             result["v1_status"] = "NÃO ENCONTRADO"
-            result["v1_detalhe"] = "Chassi não localizado em bdnIncentivos"
+            if source.count_chassi(chassi_str) > 0:
+                result["v1_detalhe"] = "Incentivo sem nota fiscal em bdnIncentivos"
+            else:
+                result["v1_detalhe"] = "Chassi não localizado em bdnIncentivos"
             return result
 
         result["v1_nf_incentivo"] = nf_numero
@@ -196,7 +202,23 @@ def run_eligibility_validation(
             progress_callback(i + 1, total, row)
 
         classif = str(row.get("Classificação Venda", "")).strip()
-        if classif in CLASSIFICACOES_COM_CHASSI:
+        produto_codigo = str(row.get("Produto Código", "") or "").strip().upper()
+        if produto_codigo == VENDA_DIRETA_PRODUTO:
+            v1 = {
+                "v1_status": "N/A",
+                "v1_saldo": None,
+                "v1_data_emissao": None,
+                "v1_nf_incentivo": None,
+                "v1_detalhe": VENDA_DIRETA_DETALHE,
+            }
+            v2 = {
+                "v2_status": "N/A",
+                "v2_saldo": None,
+                "v2_tipos_titulo": None,
+                "v2_cliente_cod": None,
+                "v2_detalhe": VENDA_DIRETA_DETALHE,
+            }
+        elif classif in CLASSIFICACOES_COM_CHASSI:
             v1 = validate_incentive(source, row.get("Nro Chassi", ""))
         else:
             v1 = {
@@ -207,11 +229,12 @@ def run_eligibility_validation(
                 "v1_detalhe": f"Classificação '{classif}' não requer validação de chassi",
             }
 
-        v2 = validate_customer_payment(
-            source,
-            row.get("Nro Documento", ""),
-            row.get("Data de Emissão", ""),
-        )
+        if produto_codigo != VENDA_DIRETA_PRODUTO:
+            v2 = validate_customer_payment(
+                source,
+                row.get("Nro Documento", ""),
+                row.get("Data de Emissão", ""),
+            )
         status_geral = combine_eligibility_status(v1["v1_status"], v2["v2_status"])
 
         result_row = {
