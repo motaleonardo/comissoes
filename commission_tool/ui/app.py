@@ -378,20 +378,26 @@ def _render_pending_tables(models: pd.DataFrame, cens: pd.DataFrame) -> None:
         st.dataframe(cens, width="stretch", hide_index=True)
 
 
-@st.dialog("Cadastros pendentes", width="large")
-def show_pending_registrations_dialog(models: pd.DataFrame, cens: pd.DataFrame) -> None:
+def render_pending_dialog_body(models: pd.DataFrame, cens: pd.DataFrame) -> None:
     st.write(
         "A apuração foi interrompida porque há linhas que ainda podem ser pagas sem cadastro. "
         "Cadastre tudo abaixo em Configurações e depois clique em **Reaplicar regras** na tela de Apurações."
     )
     _render_pending_tables(models, cens)
-    st.button(
+    if st.button(
         "Ir para Configurações",
         type="primary",
         on_click=go_to_settings,
         key="pending_dialog_go_to_settings",
         width="stretch",
-    )
+    ):
+        # The dialog runs as a fragment; force a full-app rerun so the sidebar view changes.
+        st.rerun()
+
+
+@st.dialog("Cadastros pendentes", width="large")
+def show_pending_registrations_dialog(models: pd.DataFrame, cens: pd.DataFrame) -> None:
+    render_pending_dialog_body(models, cens)
 
 
 def render_pending_registrations_block(models: pd.DataFrame, cens: pd.DataFrame) -> None:

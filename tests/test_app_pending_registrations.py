@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
@@ -25,6 +25,18 @@ class PendingRegistrationAppTests(unittest.TestCase):
             app.go_to_settings()
 
         self.assertEqual(state["nav_view"], "Configurações")
+
+    def test_dialog_settings_button_forces_full_app_rerun(self):
+        # st.dialog roda como fragmento: sem st.rerun() o clique só redesenha o popup.
+        fake_st = MagicMock()
+        fake_st.button.return_value = True
+        models = pd.DataFrame([{"Modelo": "6110J"}])
+
+        with patch.object(app, "st", fake_st):
+            app.render_pending_dialog_body(models, pd.DataFrame())
+
+        self.assertIs(fake_st.button.call_args.kwargs["on_click"], app.go_to_settings)
+        fake_st.rerun.assert_called_once_with()
 
     def test_refresh_with_reload_rules_reads_rules_again_even_when_cached(self):
         cached = pd.DataFrame([{"modelo": "VELHO", "percentual": 1.0}])
