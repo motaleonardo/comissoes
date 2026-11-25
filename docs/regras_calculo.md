@@ -74,3 +74,25 @@ Vigente a partir de 09/2026, implementado em `commission_tool/core/consorcio.py`
 - A comissão do gestor no consórcio é um percentual sobre o bem, e **não** os 33% usados em máquinas.
 - Chave única de pagamento: grupo + cota + versão + parcela.
 - Linha sem de-para de PDV ou de vendedor fica bloqueada e nunca é paga por suposição.
+
+## Travas de cadastro na apuração de máquinas
+
+Vigente a partir de 11/2026.
+
+- Não existe mais padrão de 1% para modelo sem regra de faturamento. Modelo sem regra em
+  `comissao_faturamento_modelo` **interrompe** a apuração.
+- CEN sem gerente em `comissao_gerente_vendedor` (ou com gerente vazio) também interrompe a apuração.
+- A conferência olha só as linhas que ainda podem ser pagas: sem as já pagas e excluídas e depois do
+  filtro de emissões anteriores a 01/12/2025 (quando ligado).
+- Implemento, Usados e Venda Direta têm percentual fixo e nunca ficam sem regra. A falta de regra de
+  **margem** não trava: a comissão de margem fica zero.
+- A tela lista todas as pendências de uma vez, leva a Configurações e permite "Reaplicar regras" sem
+  extrair de novo.
+
+## Incentivos e validação do Contas a Receber
+
+- O `Valor Incentivo` da apuração soma **todos** os incentivos do chassi em `bdnIncentivos`, com ou sem
+  `Nota Fiscal Número`. Como entra no `% Margem Bruta`, afeta o gatilho da comissão de margem.
+- A nota do incentivo só é usada na validação V1. Chassi que só tem incentivo sem nota fica como
+  `NÃO ENCONTRADO` ("Incentivo sem nota fiscal em bdnIncentivos"), status geral VERIFICAR.
+- Linha com `Produto Código` exatamente `CVD JD` é dispensada da validação (V1 e V2 `N/A`, status APTO).

@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from commission_tool.config import DISPLAY_COLUMNS, STATUS_APTO, STATUS_NAO_APTO, STATUS_VERIFICAR
 from commission_tool.core.apuracao import (
     EMISSION_FILTER_CUTOFF,
-    apply_frontend_default_fat_commission,
+    find_pending_registrations,
     filter_old_emissions,
     prepare_machine_apuracao,
 )

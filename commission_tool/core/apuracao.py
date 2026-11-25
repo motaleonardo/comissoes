@@ -24,6 +24,11 @@ VENDA_DIRETA_RATE = 6.0
 EMISSION_FILTER_CUTOFF = date(2025, 12, 1)
 EMISSION_FILTER_TIPOS = {"FATURAMENTO", "DEVOLUÇÃO", "DEVOLUCAO"}
 
+PENDING_MODEL_COLUMNS = ["Modelo", "Classificação Venda", "Qtd Linhas", "Chassi Exemplo"]
+PENDING_CEN_COLUMNS = ["Cod Vendedor", "CEN", "Filial", "Qtd Linhas"]
+SEM_MODELO = "(sem modelo)"
+SEM_CODIGO = "(sem código)"
+
 
 def normalize_model(value: Any) -> str:
     if pd.isna(value):
@@ -288,66 +293,6 @@ def apply_manager_commission_rules(
     return result
 
 
-def apply_frontend_default_fat_commission(
-    df_machine: pd.DataFrame,
-    enabled: bool,
-) -> pd.DataFrame:
-    """Frontend-only override for apurações: default fat commission to 1% when zero."""
-    result = df_machine.copy()
-    if result.empty:
-        result["Padrão 1% Fat. Aplicado"] = pd.Series(dtype=bool)
-        return result
-
-    pct_col = _find_column(
-        result,
-        ["% Comissão Fat.", "% ComissÃ£o Fat.", "perc_comissao_fat"],
-        required=False,
-    )
-    receita_col = _find_column(result, ["Receita Bruta", "receita_bruta"], required=False)
-    valor_fat_col = _find_column(
-        result,
-        ["Valor Comissão Fat.", "Valor ComissÃ£o Fat.", "valor_comissao_fat"],
-        required=False,
-    )
-    valor_margem_col = _find_column(
-        result,
-        ["Valor Comissão Margem", "Valor ComissÃ£o Margem", "valor_comissao_margem"],
-        required=False,
-    )
-    valor_total_col = _find_column(
-        result,
-        ["Valor Comissão Total", "Valor ComissÃ£o Total", "valor_comissao_total"],
-        required=False,
-    )
-
-    if not all([pct_col, receita_col, valor_fat_col, valor_total_col]):
-        result["Padrão 1% Fat. Aplicado"] = False
-        return result
-
-    pct_values = pd.to_numeric(result[pct_col], errors="coerce").fillna(0.0)
-    receita_values = pd.to_numeric(result[receita_col], errors="coerce").fillna(0.0)
-    margem_values = (
-        pd.to_numeric(result[valor_margem_col], errors="coerce").fillna(0.0)
-        if valor_margem_col
-        else pd.Series([0.0] * len(result), index=result.index, dtype=float)
-    )
-
-    default_mask = enabled & pct_values.eq(0.0)
-    if enabled:
-        pct_values = pct_values.mask(default_mask, 1.0)
-
-    result[pct_col] = pct_values
-    result[valor_fat_col] = receita_values * pct_values / 100
-    result[valor_total_col] = result[valor_fat_col] + margem_values
-    result["Padrão 1% Fat. Aplicado"] = default_mask.astype(bool)
-
-    # The manager's share is a percentage of the CEN total, which may have just changed.
-    if "% Comissão Gerente" in result.columns:
-        manager_pct = pd.to_numeric(result["% Comissão Gerente"], errors="coerce").fillna(0.0)
-        result["Valor Comissão Gerente"] = result[valor_total_col] * manager_pct / 100
-    return result
-
-
 def filter_old_emissions(
     df_machine: pd.DataFrame,
     enabled: bool,
@@ -568,3 +513,71 @@ def prepare_machine_apuracao(
         excluded_summary,
         excluded_document_summary,
     )
+
+
+def _text_column(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series([""] * len(df), index=df.index, dtype=object)
+    return df[column].fillna("").astype(str).str.strip()
+
+
+def _first_non_blank(values: pd.Series) -> str:
+    for value in values:
+        if value:
+            return value
+    return ""
+
+
+def find_pending_registrations(df_machine: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """List models without a revenue commission rule and CENs without a manager.
+
+    Expects the rows that can still be paid (after paid/excluded and emission filters).
+    """
+    empty_models = pd.DataFrame(columns=PENDING_MODEL_COLUMNS)
+    empty_cens = pd.DataFrame(columns=PENDING_CEN_COLUMNS)
+    if df_machine is None or df_machine.empty:
+        return empty_models, empty_cens
+
+    models = empty_models
+    if "Regra Comissão Fat. Encontrada" in df_machine.columns:
+        missing = df_machine[~df_machine["Regra Comissão Fat. Encontrada"].fillna(False).astype(bool)]
+        if not missing.empty:
+            frame = pd.DataFrame(
+                {
+                    "Modelo": _text_column(missing, "Modelo").apply(normalize_model).replace("", SEM_MODELO),
+                    "Classificação Venda": _text_column(missing, "Classificação Venda"),
+                    "Chassi": _text_column(missing, "Nro Chassi"),
+                }
+            )
+            models = (
+                frame.groupby("Modelo", sort=True)
+                .agg(
+                    **{
+                        "Classificação Venda": ("Classificação Venda", _first_non_blank),
+                        "Qtd Linhas": ("Chassi", "size"),
+                        "Chassi Exemplo": ("Chassi", _first_non_blank),
+                    }
+                )
+                .reset_index()[PENDING_MODEL_COLUMNS]
+            )
+
+    cens = empty_cens
+    if "Regra Gerente Encontrada" in df_machine.columns:
+        missing = df_machine[~df_machine["Regra Gerente Encontrada"].fillna(False).astype(bool)]
+        if not missing.empty:
+            frame = pd.DataFrame(
+                {
+                    "Cod Vendedor": _text_column(missing, "Cod Vendedor").replace("", SEM_CODIGO),
+                    "CEN": _text_column(missing, "CEN"),
+                    "Filial": _text_column(missing, "Filial"),
+                }
+            )
+            cens = (
+                frame.groupby(["Cod Vendedor", "CEN", "Filial"], sort=False)
+                .size()
+                .reset_index(name="Qtd Linhas")
+                .sort_values(["CEN", "Cod Vendedor"])
+                .reset_index(drop=True)[PENDING_CEN_COLUMNS]
+            )
+
+    return models, cens

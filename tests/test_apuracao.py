@@ -4,10 +4,13 @@ import pandas as pd
 
 from commission_tool.core.apuracao import (
     apply_commission_rules,
-    apply_frontend_default_fat_commission,
     apply_manager_commission_rules,
     apply_paid_history_filter,
     filter_old_emissions,
+    find_pending_registrations,
+    prepare_machine_apuracao,
+    PENDING_CEN_COLUMNS,
+    PENDING_MODEL_COLUMNS,
 )
 
 
@@ -249,78 +252,6 @@ class ApuracaoTests(unittest.TestCase):
         self.assertEqual(result.loc[1, "Gerente"], "")
         self.assertEqual(result.loc[1, "Valor Comissão Gerente"], 0.0)
         self.assertFalse(result.loc[1, "Regra Gerente Encontrada"])
-
-    def test_applies_frontend_default_one_percent_only_when_enabled_and_rate_is_zero(self):
-        df_machine = pd.DataFrame(
-            [
-                {
-                    "Receita Bruta": 10000.0,
-                    "% Comissao Fat.": 0.0,
-                    "Valor Comissao Fat.": 0.0,
-                    "Valor Comissao Margem": 50.0,
-                    "Valor Comissao Total": 50.0,
-                },
-                {
-                    "Receita Bruta": 10000.0,
-                    "% Comissao Fat.": 2.0,
-                    "Valor Comissao Fat.": 200.0,
-                    "Valor Comissao Margem": 20.0,
-                    "Valor Comissao Total": 220.0,
-                },
-            ]
-        ).rename(
-            columns={
-                "% Comissao Fat.": "% Comissão Fat.",
-                "Valor Comissao Fat.": "Valor Comissão Fat.",
-                "Valor Comissao Margem": "Valor Comissão Margem",
-                "Valor Comissao Total": "Valor Comissão Total",
-            }
-        )
-
-        result_enabled = apply_frontend_default_fat_commission(df_machine, enabled=True)
-        result_disabled = apply_frontend_default_fat_commission(df_machine, enabled=False)
-
-        self.assertEqual(result_enabled.loc[0, "% Comissão Fat."], 1.0)
-        self.assertEqual(result_enabled.loc[0, "Valor Comissão Fat."], 100.0)
-        self.assertEqual(result_enabled.loc[0, "Valor Comissão Total"], 150.0)
-        self.assertTrue(result_enabled.loc[0, "Padrão 1% Fat. Aplicado"])
-        self.assertEqual(result_enabled.loc[1, "% Comissão Fat."], 2.0)
-        self.assertFalse(result_enabled.loc[1, "Padrão 1% Fat. Aplicado"])
-
-        self.assertEqual(result_disabled.loc[0, "% Comissão Fat."], 0.0)
-        self.assertEqual(result_disabled.loc[0, "Valor Comissão Total"], 50.0)
-        self.assertFalse(result_disabled.loc[0, "Padrão 1% Fat. Aplicado"])
-
-    def test_default_fat_commission_recalculates_manager_commission(self):
-        # O gerente era calculado antes do padrão de 1% e ficava com R$ 0,00.
-        df_machine = pd.DataFrame(
-            [
-                {
-                    "Receita Bruta": 470000.0,
-                    "% Comissão Fat.": 0.0,
-                    "Valor Comissão Fat.": 0.0,
-                    "Valor Comissão Margem": 0.0,
-                    "Valor Comissão Total": 0.0,
-                    "% Comissão Gerente": 33.0,
-                    "Valor Comissão Gerente": 0.0,
-                },
-                {
-                    "Receita Bruta": 100000.0,
-                    "% Comissão Fat.": 0.6,
-                    "Valor Comissão Fat.": 600.0,
-                    "Valor Comissão Margem": 250.0,
-                    "Valor Comissão Total": 850.0,
-                    "% Comissão Gerente": 33.0,
-                    "Valor Comissão Gerente": 280.5,
-                },
-            ]
-        )
-
-        result = apply_frontend_default_fat_commission(df_machine, enabled=True)
-
-        self.assertAlmostEqual(result.loc[0, "Valor Comissão Total"], 4700.0)
-        self.assertAlmostEqual(result.loc[0, "Valor Comissão Gerente"], 1551.0)
-        self.assertAlmostEqual(result.loc[1, "Valor Comissão Gerente"], 280.5)
 
     def test_filters_positive_paid_history_and_keeps_negative_history_for_review(self):
         df_machine = pd.DataFrame(
@@ -587,6 +518,91 @@ class ApuracaoTests(unittest.TestCase):
 
         self.assertEqual(result.loc[0, "% Comissão Gerente"], 33.0)
         self.assertAlmostEqual(result.loc[0, "Valor Comissão Gerente"], 1980.0, places=2)
+
+
+def _raw_machine_rows(rows):
+    """rows: (classificacao, modelo, chassi, cod_vendedor)"""
+    return pd.DataFrame(
+        [
+            {
+                "Tipo": "Faturamento",
+                "Filial": "Goiânia",
+                "Nro Documento": str(index + 1),
+                "Classificação Venda": classificacao,
+                "Modelo": modelo,
+                "Nro Chassi": chassi,
+                "Cod Vendedor": cod_vendedor,
+                "CEN": f"CEN {cod_vendedor}" if cod_vendedor else "",
+                "Receita Bruta": 100000.0,
+            }
+            for index, (classificacao, modelo, chassi, cod_vendedor) in enumerate(rows)
+        ]
+    )
+
+
+class PendingRegistrationTests(unittest.TestCase):
+    def test_pending_lists_models_without_fat_rule_grouped(self):
+        raw = _raw_machine_rows(
+            [
+                ("Maquinas JD - Novos", "6110J", "CH1", "001"),
+                ("Maquinas JD - Novos", "6110J", "CH2", "001"),
+                ("Maquinas JD - Novos", "  ", "CH3", "001"),
+                ("Maquinas JD - Novos", "6125J", "CH5", "001"),
+                ("Implemento", "XYZ", "CH4", "001"),
+            ]
+        )
+        df, _ = prepare_machine_apuracao(
+            raw,
+            fat_rates=pd.DataFrame([{"modelo": "6125J", "percentual": 0.5}]),
+            margin_rates=None,
+            paid_summary=None,
+            manager_relations=pd.DataFrame([{"cod_vendedor": "001", "gerente": "G1"}]),
+        )
+
+        models, cens = find_pending_registrations(df)
+
+        self.assertEqual(list(models.columns), PENDING_MODEL_COLUMNS)
+        self.assertEqual(models["Modelo"].tolist(), ["(sem modelo)", "6110J"])
+        by_model = models.set_index("Modelo")
+        self.assertEqual(by_model.loc["6110J", "Qtd Linhas"], 2)
+        self.assertEqual(by_model.loc["6110J", "Chassi Exemplo"], "CH1")
+        self.assertEqual(by_model.loc["(sem modelo)", "Chassi Exemplo"], "CH3")
+        self.assertTrue(cens.empty)
+
+    def test_pending_lists_cen_without_manager_and_blank_manager(self):
+        raw = _raw_machine_rows(
+            [
+                ("Implemento", "XYZ", "CH1", "001"),
+                ("Implemento", "XYZ", "CH2", "002"),
+                ("Implemento", "XYZ", "CH3", "003"),
+                ("Implemento", "XYZ", "CH4", "003"),
+                ("Implemento", "XYZ", "CH5", ""),
+            ]
+        )
+        df, _ = prepare_machine_apuracao(
+            raw,
+            fat_rates=None,
+            margin_rates=None,
+            paid_summary=None,
+            manager_relations=pd.DataFrame(
+                [{"cod_vendedor": "001", "gerente": "G1"}, {"cod_vendedor": "002", "gerente": ""}]
+            ),
+        )
+
+        models, cens = find_pending_registrations(df)
+
+        self.assertTrue(models.empty)
+        self.assertEqual(list(cens.columns), PENDING_CEN_COLUMNS)
+        self.assertEqual(sorted(cens["Cod Vendedor"].tolist()), ["(sem código)", "002", "003"])
+        self.assertEqual(cens.set_index("Cod Vendedor").loc["003", "Qtd Linhas"], 2)
+
+    def test_pending_on_empty_dataframe(self):
+        models, cens = find_pending_registrations(pd.DataFrame())
+
+        self.assertTrue(models.empty)
+        self.assertTrue(cens.empty)
+        self.assertEqual(list(models.columns), PENDING_MODEL_COLUMNS)
+        self.assertEqual(list(cens.columns), PENDING_CEN_COLUMNS)
 
 
 if __name__ == "__main__":
