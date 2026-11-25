@@ -3,6 +3,7 @@ import unittest
 from commission_tool.core.formatting import (
     format_currency_br,
     format_percent_br,
+    normalize_pdv,
     parse_br_number,
     parse_percent_points,
 )
@@ -25,6 +26,21 @@ class BrazilianFormattingTests(unittest.TestCase):
         self.assertEqual(parse_percent_points("0,20%"), 0.2)
         self.assertEqual(parse_percent_points(0.05), 5.0)
         self.assertEqual(parse_percent_points(5), 5.0)
+
+
+class NormalizePdvTests(unittest.TestCase):
+    def test_same_key_regardless_of_leading_zeros(self):
+        self.assertEqual(normalize_pdv("002001"), normalize_pdv("2001"))
+
+    def test_strips_trailing_float_suffix(self):
+        self.assertEqual(normalize_pdv("2001.0"), "2001")
+
+    def test_blank_or_none_returns_empty_string(self):
+        self.assertEqual(normalize_pdv(""), "")
+        self.assertEqual(normalize_pdv(None), "")
+
+    def test_non_numeric_code_is_kept_uppercase(self):
+        self.assertEqual(normalize_pdv("abc"), "ABC")
 
 
 if __name__ == "__main__":

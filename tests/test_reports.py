@@ -5,6 +5,7 @@ import pandas as pd
 from commission_tool.core.reports import (
     build_cen_analytic_reports,
     build_cen_report,
+    build_consorcio_coordinator_report,
     build_filial_analytic_reports,
     build_manager_report,
     build_used_implements_analytic_report,
@@ -645,6 +646,31 @@ class ReportsTests(unittest.TestCase):
             marcio_df["Valor Comissão Total"].sum(), 55.0,
         )
 
+    def test_analytic_report_includes_product_code(self):
+        paid = pd.DataFrame(
+            [
+                {
+                    "mes_ano_comissao": "Setembro/2026",
+                    "cod_vendedor": "AAETBU",
+                    "cen": "ABNER SAMUEL FERREIRA COSTA",
+                    "filial": "Loja Vianopolis",
+                    "classificacao_venda": "Venda Direta",
+                    "produto_codigo": "CVD JD",
+                    "nro_documento": "000122580",
+                    "valor_comissao_fat": 6000.0,
+                    "valor_comissao_margem": 0.0,
+                    "valor_comissao_total": 6000.0,
+                }
+            ]
+        )
+
+        reports = build_cen_analytic_reports(paid, "Setembro/2026")
+
+        self.assertEqual(len(reports), 1)
+        _, _, analytic = reports[0]
+        self.assertIn("Produto Código", analytic.columns)
+        self.assertEqual(analytic.loc[0, "Produto Código"], "CVD JD")
+
     def test_build_cen_analytic_reports_returns_empty_when_no_cen_has_value(self):
         paid = pd.DataFrame(
             [
@@ -695,6 +721,212 @@ class ReportsTests(unittest.TestCase):
         self.assertEqual(analytic_df.loc[0, "Tipo"], "Faturamento")
         self.assertIn("Data de Emissão", analytic_df.columns)
         self.assertEqual(analytic_df.loc[0, "Data de Emissão"], "10/04/2026")
+
+
+CONSORCIO_PAID = pd.DataFrame(
+    [
+        {
+            "mes_ano_comissao": "Setembro/2026",
+            "cod_vendedor": "00188",
+            "cen": "VENDEDOR A",
+            "filial": "Loja Acreuna",
+            "gerente": "Reginaldo Pereira Garcia",
+            "coordenador": "DJALMA RODRIGUES DE PAULA JUNIOR",
+            "vl_bem": 200000.0,
+            "valor_comissao_cen": 1680.0,
+            "valor_comissao_gestor": 0.0,
+            "valor_comissao_coordenador": 0.0,
+        },
+        {
+            "mes_ano_comissao": "Setembro/2026",
+            "cod_vendedor": "00188",
+            "cen": "VENDEDOR A",
+            "filial": "Loja Acreuna",
+            "gerente": "Reginaldo Pereira Garcia",
+            "coordenador": "DJALMA RODRIGUES DE PAULA JUNIOR",
+            "vl_bem": 206994.15,
+            "valor_comissao_cen": 0.0,
+            "valor_comissao_gestor": 434.687715,
+            "valor_comissao_coordenador": 310.491225,
+        },
+        {
+            "mes_ano_comissao": "Agosto/2026",
+            "cod_vendedor": "00188",
+            "cen": "VENDEDOR A",
+            "filial": "Loja Acreuna",
+            "gerente": "Reginaldo Pereira Garcia",
+            "coordenador": "DJALMA RODRIGUES DE PAULA JUNIOR",
+            "vl_bem": 100000.0,
+            "valor_comissao_cen": 840.0,
+            "valor_comissao_gestor": 0.0,
+            "valor_comissao_coordenador": 0.0,
+        },
+    ]
+)
+
+
+class ConsorcioPendingInCenReportTests(unittest.TestCase):
+    def test_consorcio_cod_vendedor_without_relation_becomes_pendencia_not_silently_dropped(self):
+        """Regression for C2 item 3: a consortium cota paid to a cod_vendedor that has
+        no active CEN x Gerente relation (e.g. the relation was deactivated after the
+        cota was recorded as paid) must show up as a pendência, never disappear."""
+        relations = pd.DataFrame(
+            [{"cod_vendedor": "00188", "vendedor": "VENDEDOR A", "gerente": "Reginaldo Pereira Garcia"}]
+        )
+        consorcio_orfao = pd.DataFrame(
+            [
+                {
+                    "mes_ano_comissao": "Setembro/2026",
+                    "cod_vendedor": "SEMRELACAO",
+                    "cen": "VENDEDOR SEM RELACAO",
+                    "filial": "Loja Acreuna",
+                    "gerente": "",
+                    "coordenador": "",
+                    "vl_bem": 100000.0,
+                    "valor_comissao_cen": 840.0,
+                    "valor_comissao_gestor": 0.0,
+                    "valor_comissao_coordenador": 0.0,
+                }
+            ]
+        )
+
+        report, pending = build_cen_report(
+            pd.DataFrame(),
+            relations,
+            "Setembro/2026",
+            consorcio_paid=consorcio_orfao,
+        )
+
+        self.assertNotIn("VENDEDOR SEM RELACAO", report["CEN"].tolist())
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending.loc[0, "Cod Vendedor"], "SEMRELACAO")
+        self.assertEqual(pending.loc[0, "CEN"], "VENDEDOR SEM RELACAO")
+        self.assertEqual(pending.loc[0, "Pendência"], "Cod_vendedor de consórcio sem relação CEN x Gerente")
+        self.assertAlmostEqual(pending.loc[0, "Valor Comissão Total"], 840.0, places=2)
+
+    def test_consorcio_pendencia_is_merged_with_machine_pendencia(self):
+        relations = pd.DataFrame(
+            [{"cod_vendedor": "00188", "vendedor": "VENDEDOR A", "gerente": "Reginaldo Pereira Garcia"}]
+        )
+        paid_commissions = pd.DataFrame(
+            [
+                {
+                    "mes_ano_comissao": "Setembro/2026",
+                    "cod_vendedor": "A999",
+                    "cen": "NAO RELACIONADO",
+                    "classificacao_venda": "Maquinas JD - Usados",
+                    "valor_comissao_fat": 60.0,
+                    "valor_comissao_margem": 0.0,
+                    "valor_comissao_total": 60.0,
+                    "nro_documento": "5",
+                    "nro_chassi": "CH5",
+                }
+            ]
+        )
+        consorcio_orfao = pd.DataFrame(
+            [
+                {
+                    "mes_ano_comissao": "Setembro/2026",
+                    "cod_vendedor": "SEMRELACAO",
+                    "cen": "VENDEDOR SEM RELACAO",
+                    "vl_bem": 100000.0,
+                    "valor_comissao_cen": 840.0,
+                    "valor_comissao_gestor": 0.0,
+                    "valor_comissao_coordenador": 0.0,
+                }
+            ]
+        )
+
+        _, pending = build_cen_report(
+            paid_commissions,
+            relations,
+            "Setembro/2026",
+            consorcio_paid=consorcio_orfao,
+        )
+
+        self.assertEqual(len(pending), 2)
+        self.assertEqual(
+            set(pending["Pendência"].tolist()),
+            {"Cod_vendedor sem relação CEN x Gerente", "Cod_vendedor de consórcio sem relação CEN x Gerente"},
+        )
+
+
+class ConsorcioInReportsTests(unittest.TestCase):
+    def test_cen_report_has_consorcio_column_for_the_period(self):
+        relations = pd.DataFrame(
+            [{"cod_vendedor": "00188", "vendedor": "VENDEDOR A", "gerente": "Reginaldo Pereira Garcia"}]
+        )
+
+        report, _ = build_cen_report(
+            pd.DataFrame(),
+            relations,
+            "Setembro/2026",
+            consorcio_paid=CONSORCIO_PAID,
+        )
+
+        row = report.loc[report["CEN"] == "VENDEDOR A"].iloc[0]
+        self.assertAlmostEqual(row["Consórcio"], 1680.0, places=2)
+        self.assertAlmostEqual(row["Valor Comissão Total"], 1680.0, places=2)
+
+    def test_manager_report_adds_consorcio_outside_the_33_percent(self):
+        paid = pd.DataFrame(
+            [
+                {
+                    "mes_ano_comissao": "Setembro/2026",
+                    "gerente": "Reginaldo Pereira Garcia",
+                    "cod_vendedor": "00188",
+                    "cen": "VENDEDOR A",
+                    "filial": "Loja Acreuna",
+                    "classificacao_venda": "Venda Direta",
+                    "receita_bruta": 100000.0,
+                    "receita_bruta_incentivos_rs": 100000.0,
+                    "margem_incentivos_rs": 10000.0,
+                    "perc_margem_bruta": 10.0,
+                    "valor_comissao_fat": 6000.0,
+                    "valor_comissao_margem": 0.0,
+                    "valor_comissao_total": 6000.0,
+                }
+            ]
+        )
+
+        report = build_manager_report(paid, None, "Setembro/2026", consorcio_paid=CONSORCIO_PAID)
+
+        row = report.iloc[0]
+        self.assertAlmostEqual(row["Gestor Consórcio"], 434.687715, places=6)
+        self.assertAlmostEqual(row["Comissão Gerente"], 6000.0 * 0.33 + 434.687715, places=6)
+
+    def test_coordinator_report_sums_only_the_period(self):
+        report = build_consorcio_coordinator_report(CONSORCIO_PAID, "Setembro/2026")
+
+        self.assertEqual(report.loc[0, "Nome"], "DJALMA RODRIGUES DE PAULA JUNIOR")
+        self.assertAlmostEqual(report.loc[0, "Valor Comissão"], 310.491225, places=6)
+
+    def test_coordinator_report_merges_names_with_different_accent_and_case(self):
+        consorcio_paid = pd.DataFrame(
+            [
+                {
+                    "mes_ano_comissao": "Setembro/2026",
+                    "cod_vendedor": "00188",
+                    "coordenador": "Djalma Rodrigues de Paula Júnior",
+                    "vl_bem": 100000.0,
+                    "valor_comissao_coordenador": 150.0,
+                },
+                {
+                    "mes_ano_comissao": "Setembro/2026",
+                    "cod_vendedor": "00199",
+                    "coordenador": "DJALMA RODRIGUES DE PAULA JUNIOR",
+                    "vl_bem": 50000.0,
+                    "valor_comissao_coordenador": 75.0,
+                },
+            ]
+        )
+
+        report = build_consorcio_coordinator_report(consorcio_paid, "Setembro/2026")
+
+        self.assertEqual(len(report), 1)
+        self.assertEqual(report.loc[0, "Nome"], "Djalma Rodrigues de Paula Júnior")
+        self.assertAlmostEqual(report.loc[0, "Receita (VL Bem)"], 150000.0, places=2)
+        self.assertAlmostEqual(report.loc[0, "Valor Comissão"], 225.0, places=2)
 
 
 if __name__ == "__main__":

@@ -50,3 +50,49 @@ Enquanto a planilha de configuração não for fornecida, a extração traz todo
 - Comissão é calculada no mês da venda ou no mês do pagamento do cliente?
 - Existe teto ou piso de comissão?
 - Existe aprovação manual antes de liberar pagamento?
+
+## Venda Direta (CVD JD)
+
+Vigente a partir de 09/2026, implementado em `commission_tool/core/apuracao.py`.
+
+- Entram apenas as linhas de `bdnFaturamentoMaquinas` cujo `[Produto Código]` é exatamente `CVD JD`. Os demais códigos com `CVD` continuam fora da apuração.
+- Classificação: `Venda Direta`, atribuída pelo código do produto, e não pelo cadastro do veículo (a maioria dessas linhas não tem chassi).
+- Comissão do CEN: 6% sobre a Receita Bruta. Sem comissão de margem e sem meta.
+- Comissão do gerente: 33% sobre a comissão do CEN, pela relação em `comissao_gerente_vendedor`.
+- Confronto com o histórico: linha com chassi usa chassi + documento; linha sem chassi usa apenas o documento.
+- Limitação conhecida: quando uma nota sem chassi tem mais de uma linha, a trava é por documento. Todas as linhas dessa nota devem ser pagas na mesma apuração; se apenas parte for paga, o restante fica bloqueado como "Já tratado neste documento" e precisa de correção manual.
+
+## Consórcio
+
+Vigente a partir de 09/2026, implementado em `commission_tool/core/consorcio.py`.
+
+- Entrada: CSV do sistema de consórcio, um por PDV, com upload na tela "Apuração Consórcio".
+- Base de cálculo: `VL_Bem`. O `VL_Comissao` do arquivo é informativo.
+- Percentuais por parcela, editáveis em Configurações (`comissao_consorcio_regras`):
+  parcela 001 paga 0,84% ao CEN; parcela 002 paga 0,21% ao gestor e 0,15% ao coordenador;
+  parcela 003 não paga ninguém.
+- A comissão do gestor no consórcio é um percentual sobre o bem, e **não** os 33% usados em máquinas.
+- Chave única de pagamento: grupo + cota + versão + parcela.
+- Linha sem de-para de PDV ou de vendedor fica bloqueada e nunca é paga por suposição.
+
+## Travas de cadastro na apuração de máquinas
+
+Vigente a partir de 11/2026.
+
+- Não existe mais padrão de 1% para modelo sem regra de faturamento. Modelo sem regra em
+  `comissao_faturamento_modelo` **interrompe** a apuração.
+- CEN sem gerente em `comissao_gerente_vendedor` (ou com gerente vazio) também interrompe a apuração.
+- A conferência olha só as linhas que ainda podem ser pagas: sem as já pagas e excluídas e depois do
+  filtro de emissões anteriores a 01/12/2025 (quando ligado).
+- Implemento, Usados e Venda Direta têm percentual fixo e nunca ficam sem regra. A falta de regra de
+  **margem** não trava: a comissão de margem fica zero.
+- A tela lista todas as pendências de uma vez, leva a Configurações e permite "Reaplicar regras" sem
+  extrair de novo.
+
+## Incentivos e validação do Contas a Receber
+
+- O `Valor Incentivo` da apuração soma **todos** os incentivos do chassi em `bdnIncentivos`, com ou sem
+  `Nota Fiscal Número`. Como entra no `% Margem Bruta`, afeta o gatilho da comissão de margem.
+- A nota do incentivo só é usada na validação V1. Chassi que só tem incentivo sem nota fica como
+  `NÃO ENCONTRADO` ("Incentivo sem nota fiscal em bdnIncentivos"), status geral VERIFICAR.
+- Linha com `Produto Código` exatamente `CVD JD` é dispensada da validação (V1 e V2 `N/A`, status APTO).

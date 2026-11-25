@@ -19,9 +19,15 @@ IMPLEMENTO_THRESHOLD = 200000.0
 IMPLEMENTO_RATE_AT_OR_ABOVE_THRESHOLD = 0.84
 IMPLEMENTO_RATE_BELOW_THRESHOLD = 1.0
 USED_MACHINE_RATE = 1.0
+VENDA_DIRETA_RATE = 6.0
 
 EMISSION_FILTER_CUTOFF = date(2025, 12, 1)
 EMISSION_FILTER_TIPOS = {"FATURAMENTO", "DEVOLUÇÃO", "DEVOLUCAO"}
+
+PENDING_MODEL_COLUMNS = ["Modelo", "Classificação Venda", "Qtd Linhas", "Chassi Exemplo"]
+PENDING_CEN_COLUMNS = ["Cod Vendedor", "CEN", "Filial", "Qtd Linhas"]
+SEM_MODELO = "(sem modelo)"
+SEM_CODIGO = "(sem código)"
 
 
 def normalize_model(value: Any) -> str:
@@ -179,7 +185,8 @@ def apply_commission_rules(
 
     implemento_mask = normalized_classification.eq("IMPLEMENTO")
     used_machine_mask = normalized_classification.eq("MAQUINAS JD - USADOS")
-    classification_override_mask = implemento_mask | used_machine_mask
+    venda_direta_mask = normalized_classification.eq("VENDA DIRETA")
+    classification_override_mask = implemento_mask | used_machine_mask | venda_direta_mask
 
     result.loc[implemento_mask & receita_bruta.ge(IMPLEMENTO_THRESHOLD), "% Comissão Fat."] = (
         IMPLEMENTO_RATE_AT_OR_ABOVE_THRESHOLD
@@ -188,6 +195,7 @@ def apply_commission_rules(
         IMPLEMENTO_RATE_BELOW_THRESHOLD
     )
     result.loc[used_machine_mask, "% Comissão Fat."] = USED_MACHINE_RATE
+    result.loc[venda_direta_mask, "% Comissão Fat."] = VENDA_DIRETA_RATE
     result.loc[classification_override_mask, ["% Comissão Margem", "Meta de Margem"]] = 0.0
     result.loc[classification_override_mask, "Regra Comissão Fat. Encontrada"] = True
     result.loc[classification_override_mask, "Regra Comissão Margem Encontrada"] = True
@@ -285,61 +293,6 @@ def apply_manager_commission_rules(
     return result
 
 
-def apply_frontend_default_fat_commission(
-    df_machine: pd.DataFrame,
-    enabled: bool,
-) -> pd.DataFrame:
-    """Frontend-only override for apurações: default fat commission to 1% when zero."""
-    result = df_machine.copy()
-    if result.empty:
-        result["Padrão 1% Fat. Aplicado"] = pd.Series(dtype=bool)
-        return result
-
-    pct_col = _find_column(
-        result,
-        ["% Comissão Fat.", "% ComissÃ£o Fat.", "perc_comissao_fat"],
-        required=False,
-    )
-    receita_col = _find_column(result, ["Receita Bruta", "receita_bruta"], required=False)
-    valor_fat_col = _find_column(
-        result,
-        ["Valor Comissão Fat.", "Valor ComissÃ£o Fat.", "valor_comissao_fat"],
-        required=False,
-    )
-    valor_margem_col = _find_column(
-        result,
-        ["Valor Comissão Margem", "Valor ComissÃ£o Margem", "valor_comissao_margem"],
-        required=False,
-    )
-    valor_total_col = _find_column(
-        result,
-        ["Valor Comissão Total", "Valor ComissÃ£o Total", "valor_comissao_total"],
-        required=False,
-    )
-
-    if not all([pct_col, receita_col, valor_fat_col, valor_total_col]):
-        result["Padrão 1% Fat. Aplicado"] = False
-        return result
-
-    pct_values = pd.to_numeric(result[pct_col], errors="coerce").fillna(0.0)
-    receita_values = pd.to_numeric(result[receita_col], errors="coerce").fillna(0.0)
-    margem_values = (
-        pd.to_numeric(result[valor_margem_col], errors="coerce").fillna(0.0)
-        if valor_margem_col
-        else pd.Series([0.0] * len(result), index=result.index, dtype=float)
-    )
-
-    default_mask = enabled & pct_values.eq(0.0)
-    if enabled:
-        pct_values = pct_values.mask(default_mask, 1.0)
-
-    result[pct_col] = pct_values
-    result[valor_fat_col] = receita_values * pct_values / 100
-    result[valor_total_col] = result[valor_fat_col] + margem_values
-    result["Padrão 1% Fat. Aplicado"] = default_mask.astype(bool)
-    return result
-
-
 def filter_old_emissions(
     df_machine: pd.DataFrame,
     enabled: bool,
@@ -370,10 +323,10 @@ def _paid_status(row: pd.Series) -> str:
     tem_negativo = bool(row.get("Tem Estorno Negativo", False))
     documento_ja_tratado = bool(row.get("Documento Já Tratado", False))
 
-    if qtd == 0 and not tem_positivo and not tem_negativo:
-        return "Novo para apuração"
     if documento_ja_tratado:
         return "Já tratado neste documento"
+    if qtd == 0 and not tem_positivo and not tem_negativo:
+        return "Novo para apuração"
     if tem_negativo and tem_positivo:
         if saldo > 0:
             return "Atenção: pagamento e estorno parcial"
@@ -392,6 +345,7 @@ def apply_paid_history_filter(
     paid_summary: pd.DataFrame | None,
     paid_document_summary: pd.DataFrame | None = None,
     excluded_summary: pd.DataFrame | None = None,
+    excluded_document_summary: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Filter out exact chassis/document pairs already treated while keeping chassis history for review."""
     result = df_machine.copy()
@@ -482,6 +436,37 @@ def apply_paid_history_filter(
         ).fillna(0)
         result["Bloqueado por Exclusão"] = result["Qtd Lançamentos Excluídos"] > 0
 
+    if excluded_document_summary is None or excluded_document_summary.empty:
+        result["Qtd Lançamentos Excluídos no Documento"] = 0
+    else:
+        excluded_doc = excluded_document_summary.copy()
+        excluded_doc_chassi_col = _find_column(excluded_doc, ["nro_chassi", "Nro Chassi", "NRO_CHASSI"])
+        excluded_doc_document_col = _find_column(
+            excluded_doc,
+            ["nro_documento", "Nro Documento", "NRO_DOCUMENTO"],
+        )
+        excluded_doc["__chassi_key"] = excluded_doc[excluded_doc_chassi_col].apply(normalize_chassi)
+        excluded_doc["__document_key"] = excluded_doc[excluded_doc_document_col].apply(normalize_document)
+        excluded_doc["__pair_key"] = excluded_doc["__chassi_key"] + "||" + excluded_doc["__document_key"]
+        excluded_doc = excluded_doc.rename(
+            columns={"qtd_lancamentos_excluidos": "Qtd Lançamentos Excluídos no Documento"}
+        )
+        if "Qtd Lançamentos Excluídos no Documento" not in excluded_doc.columns:
+            excluded_doc["Qtd Lançamentos Excluídos no Documento"] = 1
+        excluded_doc = excluded_doc[["__pair_key", "Qtd Lançamentos Excluídos no Documento"]].drop_duplicates(
+            subset=["__pair_key"],
+            keep="first",
+        )
+        result = result.merge(excluded_doc, on="__pair_key", how="left")
+
+    result["Qtd Lançamentos Excluídos no Documento"] = pd.to_numeric(
+        result["Qtd Lançamentos Excluídos no Documento"],
+        errors="coerce",
+    ).fillna(0)
+    result["Bloqueado por Exclusão"] = result["Bloqueado por Exclusão"] | result[
+        "Qtd Lançamentos Excluídos no Documento"
+    ].gt(0)
+
     numeric_columns = [
         "Qtd Lançamentos Pagos",
         "Valor Pago Histórico",
@@ -490,6 +475,7 @@ def apply_paid_history_filter(
         "Qtd Lançamentos Pagos no Documento",
         "Valor Comissão Histórica Documento",
         "Qtd Lançamentos Excluídos",
+        "Qtd Lançamentos Excluídos no Documento",
     ]
     for column in numeric_columns:
         result[column] = pd.to_numeric(result[column], errors="coerce").fillna(0)
@@ -516,7 +502,82 @@ def prepare_machine_apuracao(
     paid_document_summary: pd.DataFrame | None = None,
     manager_relations: pd.DataFrame | None = None,
     excluded_summary: pd.DataFrame | None = None,
+    excluded_document_summary: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     calculated = apply_commission_rules(df_machine, fat_rates, margin_rates)
     calculated = apply_manager_commission_rules(calculated, manager_relations)
-    return apply_paid_history_filter(calculated, paid_summary, paid_document_summary, excluded_summary)
+    return apply_paid_history_filter(
+        calculated,
+        paid_summary,
+        paid_document_summary,
+        excluded_summary,
+        excluded_document_summary,
+    )
+
+
+def _text_column(df: pd.DataFrame, column: str) -> pd.Series:
+    if column not in df.columns:
+        return pd.Series([""] * len(df), index=df.index, dtype=object)
+    return df[column].fillna("").astype(str).str.strip()
+
+
+def _first_non_blank(values: pd.Series) -> str:
+    for value in values:
+        if value:
+            return value
+    return ""
+
+
+def find_pending_registrations(df_machine: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """List models without a revenue commission rule and CENs without a manager.
+
+    Expects the rows that can still be paid (after paid/excluded and emission filters).
+    """
+    empty_models = pd.DataFrame(columns=PENDING_MODEL_COLUMNS)
+    empty_cens = pd.DataFrame(columns=PENDING_CEN_COLUMNS)
+    if df_machine is None or df_machine.empty:
+        return empty_models, empty_cens
+
+    models = empty_models
+    if "Regra Comissão Fat. Encontrada" in df_machine.columns:
+        missing = df_machine[~df_machine["Regra Comissão Fat. Encontrada"].fillna(False).astype(bool)]
+        if not missing.empty:
+            frame = pd.DataFrame(
+                {
+                    "Modelo": _text_column(missing, "Modelo").apply(normalize_model).replace("", SEM_MODELO),
+                    "Classificação Venda": _text_column(missing, "Classificação Venda"),
+                    "Chassi": _text_column(missing, "Nro Chassi"),
+                }
+            )
+            models = (
+                frame.groupby("Modelo", sort=True)
+                .agg(
+                    **{
+                        "Classificação Venda": ("Classificação Venda", _first_non_blank),
+                        "Qtd Linhas": ("Chassi", "size"),
+                        "Chassi Exemplo": ("Chassi", _first_non_blank),
+                    }
+                )
+                .reset_index()[PENDING_MODEL_COLUMNS]
+            )
+
+    cens = empty_cens
+    if "Regra Gerente Encontrada" in df_machine.columns:
+        missing = df_machine[~df_machine["Regra Gerente Encontrada"].fillna(False).astype(bool)]
+        if not missing.empty:
+            frame = pd.DataFrame(
+                {
+                    "Cod Vendedor": _text_column(missing, "Cod Vendedor").replace("", SEM_CODIGO),
+                    "CEN": _text_column(missing, "CEN"),
+                    "Filial": _text_column(missing, "Filial"),
+                }
+            )
+            cens = (
+                frame.groupby(["Cod Vendedor", "CEN", "Filial"], sort=False)
+                .size()
+                .reset_index(name="Qtd Linhas")
+                .sort_values(["CEN", "Cod Vendedor"])
+                .reset_index(drop=True)[PENDING_CEN_COLUMNS]
+            )
+
+    return models, cens

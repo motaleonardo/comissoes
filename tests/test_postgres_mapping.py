@@ -11,6 +11,8 @@ from commission_tool.data.sources.postgres import (
     _prepare_manager_relations,
     _prepare_model_margin_rates,
     _prepare_paid_commissions_df,
+    read_excluded_commission_document_summary,
+    read_paid_commission_document_summary,
     replace_active_manager_relations,
     replace_active_model_fat_rates,
     replace_active_model_margin_rates,
@@ -72,6 +74,32 @@ class PaidCommissionMappingTests(unittest.TestCase):
         self.assertEqual(prepared.loc[0, "nro_chassi"], "CH1")
         self.assertEqual(prepared.loc[0, "valor_comissao_total"], 123.45)
 
+    def test_prepare_paid_commissions_maps_product_code(self):
+        df = pd.DataFrame(
+            [
+                {
+                    "Tipo": "Faturamento",
+                    "Filial": "Loja A",
+                    "Nro Documento": "0001",
+                    "Produto Código": "CVD JD",
+                    "Classificação Venda": "Venda Direta",
+                    "Valor Comissão Total": 6000.0,
+                }
+            ]
+        )
+
+        prepared = _prepare_paid_commissions_df(
+            df,
+            competence_year=2026,
+            competence_month=9,
+            period_label="09/2026",
+            period_start=date(2026, 8, 16),
+            period_end=date(2026, 9, 15),
+            source="streamlit",
+        )
+
+        self.assertEqual(prepared.loc[0, "produto_codigo"], "CVD JD")
+
     def test_prepare_paid_commissions_maps_manager_fields(self):
         df = pd.DataFrame(
             [
@@ -126,6 +154,46 @@ class PaidCommissionMappingTests(unittest.TestCase):
         self.assertEqual(prepared.loc[0, "perc_comissao_fat"], 5.0)
         self.assertEqual(prepared.loc[0, "perc_margem_direta"], 22.5)
         self.assertEqual(prepared.loc[0, "valor_comissao_total"], 750.0)
+
+    def test_prepare_paid_commissions_keeps_streamlit_percentage_points(self):
+        # A apuração da tela já entrega pontos percentuais: 1.0 = 1%, 0.45 = 0.45%.
+        df = pd.DataFrame(
+            [
+                {
+                    "Receita Bruta": 470000.0,
+                    "% Comissão Fat.": 1.0,
+                    "% Comissão Margem": 0.25,
+                    "% Margem Bruta": 0.8,
+                    "% Comissão Gerente": 33.0,
+                    "Valor Comissão Total": 4700.0,
+                },
+                {
+                    "Receita Bruta": 2215000.0,
+                    "% Comissão Fat.": 0.45,
+                    "% Comissão Margem": 0.0,
+                    "% Margem Bruta": 12.5,
+                    "% Comissão Gerente": 33.0,
+                    "Valor Comissão Total": 9967.5,
+                },
+            ]
+        )
+
+        for source in ["streamlit", "streamlit_manual", "streamlit_exclusao"]:
+            prepared = _prepare_paid_commissions_df(
+                df,
+                competence_year=2026,
+                competence_month=10,
+                period_label="Outubro/2026",
+                period_start=date(2026, 9, 16),
+                period_end=date(2026, 10, 15),
+                source=source,
+            )
+            self.assertEqual(prepared.loc[0, "perc_comissao_fat"], 1.0, source)
+            self.assertEqual(prepared.loc[0, "perc_comissao_margem"], 0.25, source)
+            self.assertEqual(prepared.loc[0, "perc_margem_bruta"], 0.8, source)
+            self.assertEqual(prepared.loc[0, "perc_comissao_gerente"], 33.0, source)
+            self.assertEqual(prepared.loc[1, "perc_comissao_fat"], 0.45, source)
+            self.assertEqual(prepared.loc[1, "perc_margem_bruta"], 12.5, source)
 
     def test_model_commission_percentages_do_not_multiply_decimal_inputs_by_one_hundred(self):
         fat_prepared = _prepare_model_fat_rates(
@@ -313,6 +381,34 @@ class PaidCommissionMappingTests(unittest.TestCase):
         self.assertEqual(captured["if_exists"], "append")
         self.assertEqual(captured["df"].loc[0, "nro_chassi"], "CH_EXCLUDED")
         self.assertEqual(captured["df"].loc[0, "valor_comissao_total"], 123.45)
+
+
+class DocumentSummaryQueryTests(unittest.TestCase):
+    def _captured_sql(self, func):
+        with patch("commission_tool.data.sources.postgres.ensure_commission_tables"), patch(
+            "commission_tool.data.sources.postgres.get_engine",
+            return_value=object(),
+        ), patch(
+            "commission_tool.data.sources.postgres.pd.read_sql",
+            return_value=pd.DataFrame(),
+        ) as read_sql:
+            func()
+        return str(read_sql.call_args.args[0])
+
+    def test_paid_document_summary_keeps_rows_without_chassi(self):
+        sql = self._captured_sql(read_paid_commission_document_summary)
+
+        self.assertIn("COALESCE(UPPER(TRIM(nro_chassi)), '') AS nro_chassi", sql)
+        self.assertIn("TRIM(nro_documento) <> ''", sql)
+        self.assertNotIn("TRIM(nro_chassi) <> ''", sql)
+
+    def test_excluded_document_summary_groups_by_chassi_and_document(self):
+        sql = self._captured_sql(read_excluded_commission_document_summary)
+
+        self.assertIn(EXCLUDED_COMMISSIONS_TABLE, sql)
+        self.assertIn("COALESCE(UPPER(TRIM(nro_chassi)), '') AS nro_chassi", sql)
+        self.assertIn("TRIM(nro_documento) AS nro_documento", sql)
+        self.assertIn("COUNT(*) AS qtd_lancamentos_excluidos", sql)
 
 
 if __name__ == "__main__":

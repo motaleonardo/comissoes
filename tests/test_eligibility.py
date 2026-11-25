@@ -1,7 +1,10 @@
 import unittest
 from datetime import date
 
-from commission_tool.config import STATUS_NAO_APTO, STATUS_VERIFICAR
+import pandas as pd
+from unittest.mock import patch
+
+from commission_tool.config import STATUS_APTO, STATUS_NAO_APTO, STATUS_VERIFICAR
 from commission_tool.core.eligibility import (
     combine_eligibility_status,
     run_eligibility_validation,
@@ -21,9 +24,13 @@ class FakeSource:
         self.title_summary = {}
         self.invoices = {}
         self.receivables = {}
+        self.incentive_rows = {}
 
     def find_incentive_invoice_by_chassi(self, chassi):
         return self.incentive_nf.get(chassi)
+
+    def count_chassi(self, chassi):
+        return self.incentive_rows.get(chassi, 0)
 
     def get_receivable_summary_by_title(self, titulo):
         return self.title_summary.get(titulo)
@@ -121,6 +128,54 @@ class EligibilityTests(unittest.TestCase):
         self.assertEqual(result.loc[0, "__apuracao_row_id"], 42)
         self.assertIn("Classificação Venda", result.columns)
         self.assertEqual(result.loc[0, "Classificação Venda"], "Implemento")
+
+    def _venda_direta_row(self, produto_codigo):
+        return pd.DataFrame(
+            [
+                {
+                    "Produto Código": produto_codigo,
+                    "Classificação Venda": "Venda Direta",
+                    "Nro Documento": "123",
+                    "Nro Chassi": "",
+                    "Data de Emissão": date(2026, 11, 1),
+                }
+            ]
+        )
+
+    def test_cvd_jd_is_apto_without_querying_receivables(self):
+        source = FakeSource()  # sem faturas: se consultasse, daria NÃO ENCONTRADO
+
+        with patch("commission_tool.core.eligibility.SQLServerDataSource", return_value=source):
+            result = run_eligibility_validation(object(), self._venda_direta_row(" cvd jd "))
+
+        row = result.iloc[0]
+        self.assertEqual(row["Status Geral"], STATUS_APTO)
+        self.assertEqual(row["V1 - Status"], "N/A")
+        self.assertEqual(row["V2 - Status"], "N/A")
+        self.assertEqual(row["V2 - Detalhe"], "Venda Direta (CVD JD) dispensada da validação")
+
+    def test_cvd_jdt_is_still_validated(self):
+        source = FakeSource()
+
+        with patch("commission_tool.core.eligibility.SQLServerDataSource", return_value=source):
+            result = run_eligibility_validation(object(), self._venda_direta_row("CVD JDT"))
+
+        self.assertEqual(result.iloc[0]["V2 - Status"], "NÃO ENCONTRADO")
+
+    def test_incentive_without_invoice_number_goes_to_verify(self):
+        source = FakeSource()
+        source.incentive_rows["CH1"] = 2
+
+        result = validate_incentive(source, "CH1")
+
+        self.assertEqual(result["v1_status"], "NÃO ENCONTRADO")
+        self.assertEqual(result["v1_detalhe"], "Incentivo sem nota fiscal em bdnIncentivos")
+
+    def test_incentive_absent_keeps_old_detail(self):
+        result = validate_incentive(FakeSource(), "CH9")
+
+        self.assertEqual(result["v1_status"], "NÃO ENCONTRADO")
+        self.assertEqual(result["v1_detalhe"], "Chassi não localizado em bdnIncentivos")
 
 
 if __name__ == "__main__":

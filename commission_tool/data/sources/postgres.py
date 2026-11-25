@@ -31,6 +31,7 @@ PAID_COLUMN_MAP = {
     "Data de Emissão": "data_emissao",
     "Nro Documento": "nro_documento",
     "Modelo": "modelo",
+    "Produto Código": "produto_codigo",
     "Nro Chassi": "nro_chassi",
     "Nome do Cliente": "nome_cliente",
     "CEN": "cen",
@@ -123,6 +124,7 @@ def ensure_commission_tables() -> None:
                     data_emissao DATE,
                     nro_documento TEXT,
                     modelo TEXT,
+                    produto_codigo TEXT,
                     nro_chassi TEXT,
                     nome_cliente TEXT,
                     cen TEXT,
@@ -167,6 +169,7 @@ def ensure_commission_tables() -> None:
                     data_emissao DATE,
                     nro_documento TEXT,
                     modelo TEXT,
+                    produto_codigo TEXT,
                     nro_chassi TEXT,
                     nome_cliente TEXT,
                     cen TEXT,
@@ -256,6 +259,10 @@ def ensure_commission_tables() -> None:
         conn.execute(text(f"ALTER TABLE {EXCLUDED_COMMISSIONS_TABLE} ADD COLUMN IF NOT EXISTS gerente TEXT"))
         conn.execute(text(f"ALTER TABLE {EXCLUDED_COMMISSIONS_TABLE} ADD COLUMN IF NOT EXISTS perc_comissao_gerente NUMERIC(12, 6)"))
         conn.execute(text(f"ALTER TABLE {EXCLUDED_COMMISSIONS_TABLE} ADD COLUMN IF NOT EXISTS valor_comissao_gerente NUMERIC(18, 2)"))
+        for table_name in (PAID_COMMISSIONS_TABLE, EXCLUDED_COMMISSIONS_TABLE):
+            conn.execute(
+                text(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS produto_codigo TEXT")
+            )
         conn.execute(
             text(
                 f"""
@@ -432,12 +439,25 @@ def _prepare_paid_commissions_df(
     for column in amount_columns:
         prepared[column] = prepared[column].apply(parse_br_number)
         prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
+    # Excel uploads may carry 5% as 0.05. The app's own apuração already sends
+    # percentage points (1.0 = 1%), so scaling those turned 1% into 100%.
+    excel_source = str(source or "").strip().lower().endswith("_excel")
     for column in percent_columns:
-        parser = parse_margin_target_percent_points if column == "meta_margem" else parse_percent_points
+        if column == "meta_margem":
+            parser = parse_margin_target_percent_points
+        elif excel_source:
+            parser = parse_percent_points
+        else:
+            parser = _parse_percent_points_unscaled
         prepared[column] = prepared[column].apply(parser)
         prepared[column] = pd.to_numeric(prepared[column], errors="coerce")
 
     return prepared
+
+
+def _parse_percent_points_unscaled(value) -> float:
+    parsed = parse_br_number(value)
+    return 0.0 if parsed is None else parsed
 
 
 def _save_commission_rows(
@@ -829,7 +849,10 @@ def read_paid_commission_chassis_summary() -> pd.DataFrame:
 
 
 def read_paid_commission_document_summary() -> pd.DataFrame:
-    """Read all paid commission history aggregated by chassis and document."""
+    """Read all paid commission history aggregated by chassis and document.
+
+    Rows without chassis are kept: for them the document alone is the key.
+    """
     from sqlalchemy import text
 
     ensure_commission_tables()
@@ -837,16 +860,14 @@ def read_paid_commission_document_summary() -> pd.DataFrame:
     query = text(
         f"""
         SELECT
-            UPPER(TRIM(nro_chassi)) AS nro_chassi,
+            COALESCE(UPPER(TRIM(nro_chassi)), '') AS nro_chassi,
             TRIM(nro_documento) AS nro_documento,
             COUNT(*) AS qtd_lancamentos_documento_pago,
             COALESCE(SUM(valor_comissao_total), 0) AS valor_comissao_total_documento
         FROM {PAID_COMMISSIONS_TABLE}
-        WHERE nro_chassi IS NOT NULL
-          AND TRIM(nro_chassi) <> ''
-          AND nro_documento IS NOT NULL
+        WHERE nro_documento IS NOT NULL
           AND TRIM(nro_documento) <> ''
-        GROUP BY UPPER(TRIM(nro_chassi)), TRIM(nro_documento)
+        GROUP BY COALESCE(UPPER(TRIM(nro_chassi)), ''), TRIM(nro_documento)
         """
     )
     return pd.read_sql(query, engine)
@@ -868,6 +889,27 @@ def read_excluded_commission_chassis_summary() -> pd.DataFrame:
         WHERE nro_chassi IS NOT NULL
           AND TRIM(nro_chassi) <> ''
         GROUP BY UPPER(TRIM(nro_chassi))
+        """
+    )
+    return pd.read_sql(query, engine)
+
+
+def read_excluded_commission_document_summary() -> pd.DataFrame:
+    """Read manually excluded commissions aggregated by chassis and document."""
+    from sqlalchemy import text
+
+    ensure_commission_tables()
+    engine = get_engine()
+    query = text(
+        f"""
+        SELECT
+            COALESCE(UPPER(TRIM(nro_chassi)), '') AS nro_chassi,
+            TRIM(nro_documento) AS nro_documento,
+            COUNT(*) AS qtd_lancamentos_excluidos
+        FROM {EXCLUDED_COMMISSIONS_TABLE}
+        WHERE nro_documento IS NOT NULL
+          AND TRIM(nro_documento) <> ''
+        GROUP BY COALESCE(UPPER(TRIM(nro_chassi)), ''), TRIM(nro_documento)
         """
     )
     return pd.read_sql(query, engine)

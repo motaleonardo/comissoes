@@ -14,6 +14,7 @@ ANALYTIC_REPORT_COLUMN_MAP = [
     ("data_emissao", "Data de Emissão"),
     ("nro_documento", "Nro Documento"),
     ("nro_chassi", "Nro Chassi"),
+    ("produto_codigo", "Produto Código"),
     ("nome_cliente", "Nome do Cliente"),
     ("cen", "CEN"),
     ("classificacao_venda", "Classificação Venda"),
@@ -174,10 +175,120 @@ def _sort_by_available(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
     return frame.sort_values(available, na_position="last")
 
 
+def _prepare_consorcio_for_period(
+    consorcio_paid: pd.DataFrame | None,
+    period_label: str,
+) -> pd.DataFrame:
+    if consorcio_paid is None or consorcio_paid.empty:
+        return pd.DataFrame()
+
+    rows = consorcio_paid.copy()
+    rows = rows[
+        rows.get("mes_ano_comissao", pd.Series(dtype=object)).fillna("").astype(str).eq(str(period_label))
+    ].copy()
+    if rows.empty:
+        return rows
+
+    rows["__cod_vendedor"] = rows.get("cod_vendedor", pd.Series(dtype=object)).apply(_normalize_code)
+    rows["__gerente"] = rows.get("gerente", pd.Series(dtype=object)).apply(_normalize_text)
+    rows["__coordenador"] = rows.get("coordenador", pd.Series(dtype=object)).apply(_normalize_text)
+    for column in ["vl_bem", "valor_comissao_cen", "valor_comissao_gestor", "valor_comissao_coordenador"]:
+        rows[column] = pd.to_numeric(
+            rows[column] if column in rows.columns else pd.Series(index=rows.index, dtype=float),
+            errors="coerce",
+        ).fillna(0.0)
+    return rows
+
+
+def build_consorcio_coordinator_report(
+    consorcio_paid: pd.DataFrame | None,
+    period_label: str,
+) -> pd.DataFrame:
+    report_columns = ["Nome", "Receita (VL Bem)", "Valor Comissão"]
+    rows = _prepare_consorcio_for_period(consorcio_paid, period_label)
+    if rows.empty:
+        return pd.DataFrame(columns=report_columns)
+
+    rows = rows[rows["valor_comissao_coordenador"].ne(0)]
+    if rows.empty:
+        return pd.DataFrame(columns=report_columns)
+
+    coordinator_rows: list[dict[str, float | str]] = []
+    for coordinator_key, coordinator_paid in rows.groupby("__coordenador", dropna=False):
+        display_candidates = (
+            coordinator_paid.get("coordenador", pd.Series(dtype=object))
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+        coordinator_name = next(
+            (value for value in display_candidates if value),
+            str(coordinator_key).strip(),
+        )
+        coordinator_rows.append(
+            {
+                "Nome": coordinator_name,
+                "Receita (VL Bem)": coordinator_paid["vl_bem"].sum(),
+                "Valor Comissão": coordinator_paid["valor_comissao_coordenador"].sum(),
+            }
+        )
+
+    return pd.DataFrame(coordinator_rows, columns=report_columns).reset_index(drop=True)
+
+
+def _apply_consorcio_to_cen_report(report: pd.DataFrame, consorcio: pd.DataFrame) -> pd.DataFrame:
+    if consorcio.empty:
+        report["Consórcio"] = 0.0
+    else:
+        consorcio_por_cen = (
+            consorcio.groupby("__cod_vendedor")["valor_comissao_cen"].sum().rename("Consórcio").reset_index()
+        )
+        report = report.merge(consorcio_por_cen, on="__cod_vendedor", how="left")
+        report["Consórcio"] = pd.to_numeric(report["Consórcio"], errors="coerce").fillna(0.0)
+    report["Valor Comissão Total"] = report["Valor Comissão Total"] + report["Consórcio"]
+    return report
+
+
+def _consorcio_pending_rows(
+    consorcio: pd.DataFrame,
+    valid_codes: set[str],
+    pending_columns: list[str],
+) -> pd.DataFrame:
+    """Consortium cotas paid to a cod_vendedor with no active CEN x Gerente relation.
+
+    ``_apply_consorcio_to_cen_report`` only merges consortium commission onto CENs
+    that exist in ``report_base`` (i.e. have an active relation); anything else is
+    silently dropped from the "Consórcio" column. This surfaces those rows as a
+    pendência instead, mirroring the machine-commission pendência block.
+    """
+    if consorcio.empty:
+        return pd.DataFrame(columns=pending_columns)
+
+    unmatched = consorcio.loc[~consorcio["__cod_vendedor"].isin(valid_codes)].copy()
+    if unmatched.empty:
+        return pd.DataFrame(columns=pending_columns)
+
+    unmatched["Pendência"] = "Cod_vendedor de consórcio sem relação CEN x Gerente"
+    unmatched = unmatched.rename(
+        columns={
+            "cod_vendedor": "Cod Vendedor",
+            "cen": "CEN",
+        }
+    )
+    unmatched["Valor Comissão Total"] = pd.to_numeric(
+        unmatched.get("valor_comissao_cen"), errors="coerce"
+    ).fillna(0.0)
+    for column in pending_columns:
+        if column not in unmatched.columns:
+            unmatched[column] = None
+    return unmatched[pending_columns].reset_index(drop=True)
+
+
 def build_cen_report(
     paid_commissions: pd.DataFrame | None,
     manager_relations: pd.DataFrame | None,
     period_label: str,
+    consorcio_paid: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     report_columns = [
         "CEN",
@@ -187,6 +298,7 @@ def build_cen_report(
         "Comissão Implementos",
         "Outros",
         "Comissão Margem",
+        "Consórcio",
         "Valor Comissão Total",
     ]
     pending_columns = [
@@ -208,15 +320,22 @@ def build_cen_report(
     relations = relations[relations["__vendedor"].ne(relations["__gerente"])].copy()
     relations = relations.drop_duplicates(subset=["__cod_vendedor"], keep="first")
     report_base = relations[["__cod_vendedor", "__vendedor_display"]].rename(columns={"__vendedor_display": "CEN"}).copy()
+    valid_codes = set(report_base["__cod_vendedor"].tolist())
+
+    consorcio = _prepare_consorcio_for_period(consorcio_paid, period_label)
+    consorcio_pending = _consorcio_pending_rows(consorcio, valid_codes, pending_columns)
 
     paid = _prepare_paid_commissions_for_period(paid_commissions, period_label)
     if paid.empty:
         report = report_base.copy().sort_values("CEN", na_position="last").reset_index(drop=True)
         for column in report_columns[1:]:
+            if column in ("Consórcio", "Valor Comissão Total"):
+                continue
             report[column] = 0.0
-        return report[report_columns], pd.DataFrame(columns=pending_columns)
+        report["Valor Comissão Total"] = 0.0
+        report = _apply_consorcio_to_cen_report(report, consorcio)
+        return report[report_columns], consorcio_pending
 
-    valid_codes = set(report_base["__cod_vendedor"].tolist())
     pending_mask = paid["__cod_vendedor"].eq("") | ~paid["__cod_vendedor"].isin(valid_codes)
     pending = paid.loc[pending_mask].copy()
     pending["Pendência"] = pending["__cod_vendedor"].apply(
@@ -241,12 +360,17 @@ def build_cen_report(
         pending = pending[pending_columns].reset_index(drop=True)
     else:
         pending = pd.DataFrame(columns=pending_columns)
+    pending = pd.concat([pending, consorcio_pending], ignore_index=True)[pending_columns]
 
     paid = paid.loc[~pending_mask].copy()
     if paid.empty:
         report = report_base.copy().sort_values("CEN", na_position="last").reset_index(drop=True)
         for column in report_columns[1:]:
+            if column in ("Consórcio", "Valor Comissão Total"):
+                continue
             report[column] = 0.0
+        report["Valor Comissão Total"] = 0.0
+        report = _apply_consorcio_to_cen_report(report, consorcio)
         return report[report_columns], pending
 
     aggregated = paid.groupby("__cod_vendedor", dropna=False).apply(_aggregate_cen_commission_columns).reset_index()
@@ -261,7 +385,10 @@ def build_cen_report(
 
     report = report_base.merge(aggregated, on="__cod_vendedor", how="left")
     for column in report_columns[1:]:
+        if column == "Consórcio":
+            continue
         report[column] = pd.to_numeric(report.get(column), errors="coerce").fillna(0.0)
+    report = _apply_consorcio_to_cen_report(report, consorcio)
     report = report.drop(columns=["__cod_vendedor"]).sort_values("CEN", na_position="last").reset_index(drop=True)
     return report[report_columns], pending
 
@@ -270,6 +397,7 @@ def build_manager_report(
     paid_commissions: pd.DataFrame | None,
     manager_relations: pd.DataFrame | None,
     period_label: str,
+    consorcio_paid: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     report_columns = [
         "Gerente",
@@ -277,18 +405,19 @@ def build_manager_report(
         "Margem + Incentivos R$",
         "% Margem Bruta",
         "Comissão Total CEN",
+        "Gestor Consórcio",
         "Comissão Gerente",
     ]
 
+    consorcio = _prepare_consorcio_for_period(consorcio_paid, period_label)
+
     paid = _prepare_paid_commissions_for_period(paid_commissions, period_label)
     if paid.empty:
-        return pd.DataFrame(columns=report_columns)
-
-    paid["__gerente"] = paid.get("gerente", pd.Series(dtype=object)).apply(_normalize_text)
-    paid["__gerente_display"] = paid.get("gerente", pd.Series(dtype=object)).fillna("").astype(str).str.strip()
-    paid = paid[paid["__gerente"].ne("")].copy()
-    if paid.empty:
-        return pd.DataFrame(columns=report_columns)
+        paid = pd.DataFrame(columns=["__gerente", "__gerente_display"])
+    else:
+        paid["__gerente"] = paid.get("gerente", pd.Series(dtype=object)).apply(_normalize_text)
+        paid["__gerente_display"] = paid.get("gerente", pd.Series(dtype=object)).fillna("").astype(str).str.strip()
+        paid = paid[paid["__gerente"].ne("")].copy()
 
     rows: list[dict[str, float | str]] = []
     for manager_key, manager_paid in paid.groupby("__gerente", dropna=False):
@@ -312,6 +441,12 @@ def build_manager_report(
 
         commission_total_cen = manager_paid["valor_comissao_total"].sum()
 
+        consorcio_gestor = 0.0
+        if not consorcio.empty:
+            consorcio_gestor = float(
+                consorcio.loc[consorcio["__gerente"].eq(manager_key), "valor_comissao_gestor"].sum()
+            )
+
         rows.append(
             {
                 "Gerente": gerente_name,
@@ -319,9 +454,36 @@ def build_manager_report(
                 "Margem + Incentivos R$": margin_incentives,
                 "% Margem Bruta": weighted_margin,
                 "Comissão Total CEN": commission_total_cen,
-                "Comissão Gerente": commission_total_cen * 0.33,
+                "Gestor Consórcio": consorcio_gestor,
+                "Comissão Gerente": commission_total_cen * 0.33 + consorcio_gestor,
             }
         )
+
+    ja_listados = {_normalize_text(row["Gerente"]) for row in rows}
+    if not consorcio.empty:
+        for manager_key, manager_consorcio in consorcio.groupby("__gerente", dropna=False):
+            if not manager_key or manager_key in ja_listados:
+                continue
+            gerente_display = (
+                manager_consorcio.get("gerente", pd.Series(dtype=object))
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .replace("", pd.NA)
+                .dropna()
+            )
+            consorcio_gestor = float(manager_consorcio["valor_comissao_gestor"].sum())
+            rows.append(
+                {
+                    "Gerente": gerente_display.iloc[0] if not gerente_display.empty else str(manager_key),
+                    "Receita Bruta": 0.0,
+                    "Margem + Incentivos R$": 0.0,
+                    "% Margem Bruta": 0.0,
+                    "Comissão Total CEN": 0.0,
+                    "Gestor Consórcio": consorcio_gestor,
+                    "Comissão Gerente": consorcio_gestor,
+                }
+            )
 
     return pd.DataFrame(rows, columns=report_columns).sort_values("Gerente", na_position="last").reset_index(drop=True)
 
