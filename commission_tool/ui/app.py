@@ -316,20 +316,25 @@ def send_report_email_jobs(jobs: list[ReportEmailJob], report_period: str) -> tu
     return sent_count, failures
 
 
-def refresh_machine_apuracao_state() -> None:
+def go_to_settings() -> None:
+    """Callback: switch the sidebar view to Configurações (runs before the radio is drawn)."""
+    st.session_state.nav_view = "Configurações"
+
+
+def refresh_machine_apuracao_state(reload_rules: bool = False) -> None:
     df_machine_raw = st.session_state.get("machine_raw_df")
     if df_machine_raw is None:
         return
 
-    df_fat_rates = st.session_state.get("machine_rate_fat_df")
+    df_fat_rates = None if reload_rules else st.session_state.get("machine_rate_fat_df")
     if df_fat_rates is None:
         df_fat_rates = read_model_fat_rates()
 
-    df_margin_rates = st.session_state.get("machine_rate_margin_df")
+    df_margin_rates = None if reload_rules else st.session_state.get("machine_rate_margin_df")
     if df_margin_rates is None:
         df_margin_rates = read_model_margin_rates()
 
-    df_manager_relations = st.session_state.get("manager_relations_df")
+    df_manager_relations = None if reload_rules else st.session_state.get("manager_relations_df")
     if df_manager_relations is None:
         df_manager_relations = read_manager_relations()
 
@@ -354,10 +359,65 @@ def refresh_machine_apuracao_state() -> None:
     st.session_state.machine_excluded_summary_df = df_excluded_summary
     st.session_state.machine_excluded_document_summary_df = df_excluded_document_summary
     st.session_state.manager_relations_df = df_manager_relations
+    st.session_state.machine_rate_fat_df = df_fat_rates
+    st.session_state.machine_rate_margin_df = df_margin_rates
     st.session_state.machine_receivable_validation_df = None
     st.session_state.machine_pay_review_df = None
     st.session_state.machine_exclude_review_df = None
     st.session_state.machine_selection_state = {}
+    if reload_rules:
+        st.session_state.machine_pending_dialog_shown = False
+
+
+def _render_pending_tables(models: pd.DataFrame, cens: pd.DataFrame) -> None:
+    if not models.empty:
+        st.markdown(f"**Modelos sem regra de comissão sobre faturamento ({len(models)})**")
+        st.dataframe(models, width="stretch", hide_index=True)
+    if not cens.empty:
+        st.markdown(f"**CENs sem gerente na relação CEN x Gerente ({len(cens)})**")
+        st.dataframe(cens, width="stretch", hide_index=True)
+
+
+@st.dialog("Cadastros pendentes", width="large")
+def show_pending_registrations_dialog(models: pd.DataFrame, cens: pd.DataFrame) -> None:
+    st.write(
+        "A apuração foi interrompida porque há linhas que ainda podem ser pagas sem cadastro. "
+        "Cadastre tudo abaixo em Configurações e depois clique em **Reaplicar regras** na tela de Apurações."
+    )
+    _render_pending_tables(models, cens)
+    st.button(
+        "Ir para Configurações",
+        type="primary",
+        on_click=go_to_settings,
+        key="pending_dialog_go_to_settings",
+        width="stretch",
+    )
+
+
+def render_pending_registrations_block(models: pd.DataFrame, cens: pd.DataFrame) -> None:
+    """Blocks the apuração: shows every pending registration at once and the ways out."""
+    st.error(
+        f"Apuração interrompida: {len(models)} modelo(s) sem regra de faturamento e "
+        f"{len(cens)} CEN(s) sem gerente. Cadastre em Configurações e clique em Reaplicar regras."
+    )
+    _render_pending_tables(models, cens)
+    col_show, col_settings, col_reapply = st.columns(3)
+    with col_show:
+        if st.button("Ver pendências", width="stretch"):
+            show_pending_registrations_dialog(models, cens)
+    with col_settings:
+        st.button("Ir para Configurações", on_click=go_to_settings, width="stretch")
+    with col_reapply:
+        if st.button("Reaplicar regras", type="primary", width="stretch"):
+            try:
+                refresh_machine_apuracao_state(reload_rules=True)
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Não foi possível reaplicar as regras: {exc}")
+
+    if not st.session_state.get("machine_pending_dialog_shown", False):
+        st.session_state.machine_pending_dialog_shown = True
+        show_pending_registrations_dialog(models, cens)
 
 
 def render_machine_audit(
@@ -576,6 +636,7 @@ def render_sidebar() -> str:
         st.markdown("### Processo")
         return st.radio(
             "Selecione a visão",
+            key="nav_view",
             options=[
                 "Apurações",
                 "Apuração Consórcio",
@@ -2306,6 +2367,7 @@ def render_machine_extraction() -> None:
             st.session_state.machine_pay_review_df = None
             st.session_state.machine_exclude_review_df = None
             st.session_state.machine_selection_state = {}
+            st.session_state.machine_pending_dialog_shown = False
             bloqueados_pagamento = int(
                 pd.to_numeric(
                     df_machine_history.get("Bloqueado por Pagamento Histórico"),
@@ -2333,31 +2395,6 @@ def render_machine_extraction() -> None:
     if df_machine_full is None:
         df_machine_full = df_machine
 
-    use_default_fat_rate = st.toggle(
-        "Aplicar padrão de 1% quando % Comissão Fat. = 0",
-        value=st.session_state.get("machine_default_one_percent_enabled", True),
-        key="machine_default_one_percent_enabled",
-        help="Regra visual da seção Apurações. Não altera as tabelas de configuração no Postgres.",
-    )
-    previous_default_toggle = st.session_state.get("machine_default_one_percent_last")
-    if previous_default_toggle is None:
-        st.session_state.machine_default_one_percent_last = use_default_fat_rate
-    elif previous_default_toggle != use_default_fat_rate:
-        st.session_state.machine_default_one_percent_last = use_default_fat_rate
-        st.session_state.machine_receivable_validation_df = None
-        st.session_state.machine_pay_review_df = None
-        st.session_state.machine_exclude_review_df = None
-        st.session_state.machine_selection_state = {}
-        st.info("A validação e as revisões foram limpas porque a regra padrão de 1% foi alterada.")
-
-    df_machine = apply_frontend_default_fat_commission(df_machine, use_default_fat_rate)
-    default_applied_count = int(
-        pd.to_numeric(
-            df_machine.get("Padrão 1% Fat. Aplicado", pd.Series([False] * len(df_machine), index=df_machine.index)),
-            errors="coerce",
-        ).fillna(0).sum()
-    )
-
     cutoff_label = EMISSION_FILTER_CUTOFF.strftime("%d/%m/%Y")
     filter_old_emissions_enabled = st.toggle(
         f"Filtrar Faturamento/Devolução anteriores a {cutoff_label}",
@@ -2384,6 +2421,13 @@ def render_machine_extraction() -> None:
     df_machine, old_emissions_filtered_count = filter_old_emissions(
         df_machine, filter_old_emissions_enabled
     )
+
+    pending_models, pending_cens = find_pending_registrations(df_machine)
+    st.session_state.machine_pending_models_df = pending_models
+    st.session_state.machine_pending_cens_df = pending_cens
+    if not pending_models.empty or not pending_cens.empty:
+        render_pending_registrations_block(pending_models, pending_cens)
+        return
 
     st.markdown('<div class="section-title">Tabela Única de Máquinas</div>', unsafe_allow_html=True)
 
@@ -2424,7 +2468,6 @@ def render_machine_extraction() -> None:
         f"Excluídas manualmente: "
         f"{int(pd.to_numeric(df_machine_full.get('Bloqueado por Exclusão'), errors='coerce').fillna(0).sum())} | "
         f"Sem regra fat.: {sem_regra_fat} | Sem regra margem: {sem_regra_margem} | "
-        f"Padrão 1% aplicado: {default_applied_count} | "
         f"Emissões anteriores a {cutoff_label} excluídas: {old_emissions_filtered_count}"
     )
 
@@ -3487,6 +3530,21 @@ def render_settings_view() -> None:
     st.markdown('<div class="section-title">Configurações</div>', unsafe_allow_html=True)
     st.caption("Uploads e manutenção dos percentuais ativos de comissão por modelo.")
 
+    pending_models = st.session_state.get("machine_pending_models_df")
+    pending_cens = st.session_state.get("machine_pending_cens_df")
+    has_pending_models = pending_models is not None and not pending_models.empty
+    has_pending_cens = pending_cens is not None and not pending_cens.empty
+    if has_pending_models or has_pending_cens:
+        with st.container(border=True):
+            st.warning(
+                "Pendências da última apuração. Depois de salvar os cadastros, volte a Apurações "
+                "e clique em Reaplicar regras."
+            )
+            _render_pending_tables(
+                pending_models if has_pending_models else pd.DataFrame(),
+                pending_cens if has_pending_cens else pd.DataFrame(),
+            )
+
     col_schema, col_load = st.columns([1, 1])
     with col_schema:
         if st.button("Garantir tabelas Postgres", width="stretch"):
@@ -3721,10 +3779,12 @@ def main() -> None:
         st.session_state.machine_rate_margin_df = None
     if "manager_relations_df" not in st.session_state:
         st.session_state.manager_relations_df = None
-    if "machine_default_one_percent_enabled" not in st.session_state:
-        st.session_state.machine_default_one_percent_enabled = True
-    if "machine_default_one_percent_last" not in st.session_state:
-        st.session_state.machine_default_one_percent_last = None
+    if "machine_pending_dialog_shown" not in st.session_state:
+        st.session_state.machine_pending_dialog_shown = False
+    if "machine_pending_models_df" not in st.session_state:
+        st.session_state.machine_pending_models_df = None
+    if "machine_pending_cens_df" not in st.session_state:
+        st.session_state.machine_pending_cens_df = None
     if "settings_fat_rates_df" not in st.session_state:
         st.session_state.settings_fat_rates_df = None
     if "settings_margin_rates_df" not in st.session_state:
