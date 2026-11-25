@@ -84,7 +84,8 @@ class SQLServerDataSource:
         cursor.execute(
             "SELECT TOP 1 [Nota Fiscal Número] "
             "FROM bdnIncentivos "
-            "WHERE LTRIM(RTRIM([Chassi])) = ?",
+            "WHERE LTRIM(RTRIM([Chassi])) = ? "
+            "AND NULLIF(LTRIM(RTRIM([Nota Fiscal Número])), '') IS NOT NULL",
             chassi,
         )
         row = cursor.fetchone()
@@ -443,7 +444,6 @@ class SQLServerDataSource:
                 SUM(COALESCE([Valor Incentivo], 0)) AS valor_incentivo
             FROM bdnIncentivos
             WHERE NULLIF(LTRIM(RTRIM([Chassi])), '') IS NOT NULL
-              AND NULLIF(LTRIM(RTRIM([Nota Fiscal Número])), '') IS NOT NULL
             GROUP BY
                 LTRIM(RTRIM([Chassi])),
                 LTRIM(RTRIM([Nota Fiscal Número]))

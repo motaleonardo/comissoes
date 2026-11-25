@@ -1,6 +1,6 @@
 import unittest
 from datetime import date
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
@@ -164,6 +164,35 @@ class MachineCommissionQueryTests(unittest.TestCase):
         self.assertIn("COUNT(DISTINCT b.chassi) AS [Qtd Chassis SQL]", sql)
         self.assertIn("AS [Valor Incentivo com T\u00edtulo SQL]", sql)
         self.assertIn("AS [Valor Incentivo sem T\u00edtulo SQL]", sql)
+
+    def test_machine_query_sums_incentives_without_invoice_number(self):
+        with patch(
+            "commission_tool.data.sources.sqlserver.pd.read_sql",
+            return_value=pd.DataFrame(),
+        ) as read_sql:
+            SQLServerDataSource(conn=object()).extract_machine_commission_base(
+                date(2026, 3, 16),
+                date(2026, 4, 15),
+            )
+
+        sql = read_sql.call_args.args[0]
+        incentive_cte = sql.split("incentivos AS (")[0]
+
+        self.assertIn("FROM bdnIncentivos", incentive_cte)
+        self.assertIn("NULLIF(LTRIM(RTRIM([Chassi])), '') IS NOT NULL", incentive_cte)
+        self.assertNotIn("NULLIF(LTRIM(RTRIM([Nota Fiscal N\u00famero])), '') IS NOT NULL", incentive_cte)
+
+    def test_find_incentive_invoice_ignores_rows_without_invoice_number(self):
+        cursor = MagicMock()
+        cursor.fetchone.return_value = None
+        conn = MagicMock()
+        conn.cursor.return_value = cursor
+
+        result = SQLServerDataSource(conn).find_incentive_invoice_by_chassi("ABC123")
+
+        executed_sql = cursor.execute.call_args.args[0]
+        self.assertIn("NULLIF(LTRIM(RTRIM([Nota Fiscal N\u00famero])), '') IS NOT NULL", executed_sql)
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
